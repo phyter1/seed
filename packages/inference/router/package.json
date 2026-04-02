@@ -1,0 +1,15 @@
+{
+  "name": "@seed/router",
+  "version": "0.1.0",
+  "description": "LLM-powered request routing across a fleet of machines",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "router": "bun run src/router.ts",
+    "test": "tsx src/test-runner.ts"
+  },
+  "dependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

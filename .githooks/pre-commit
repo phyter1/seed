@@ -1,0 +1,15 @@
+#!/bin/bash
+# Pre-commit hook: scan for secrets before allowing commit
+set -e
+
+# Find gitleaks
+GITLEAKS=$(which gitleaks 2>/dev/null || echo "/tmp/gitleaks")
+if [ ! -x "$GITLEAKS" ]; then
+  echo "WARNING: gitleaks not found. Install it: https://github.com/gitleaks/gitleaks"
+  echo "Skipping secret scan."
+  exit 0
+fi
+
+echo "Scanning for secrets..."
+$GITLEAKS protect --staged --config .gitleaks.toml -v
+echo "No secrets found."

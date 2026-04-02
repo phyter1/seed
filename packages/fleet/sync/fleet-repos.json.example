@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "updated_at": "2026-01-01T00:00:00Z",
+  "repos": [
+    {
+      "id": "seed",
+      "path": "/path/to/seed",
+      "branch": "main",
+      "required_on": ["machine-1", "machine-2"],
+      "sync_policy": "bidirectional-auto",
+      "sync_script": "tools/git-sync.sh",
+      "conflict_policy": "repo-local-script",
+      "notes": [
+        "Identity repo. Uses a local sync script for conflict resolution."
+      ]
+    },
+    {
+      "id": "my-project",
+      "path": "/path/to/my-project",
+      "branch": "main",
+      "required_on": ["machine-1", "machine-2"],
+      "sync_policy": "ff-only",
+      "conflict_policy": "single-writer-branch"
+    },
+    {
+      "id": "manual-repo",
+      "path": "/path/to/manual-repo",
+      "branch": "main",
+      "required_on": ["machine-1"],
+      "sync_policy": "manual",
+      "conflict_policy": "human-resolves"
+    }
+  ]
+}

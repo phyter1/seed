@@ -1,0 +1,59 @@
+# Objectives
+
+Active goals for heartbeat instances to work on. Read this each pulse. Pick up where the last instance left off.
+
+## 1. [Objective Name] (ACTIVE)
+
+**Status:** [Current state — starting, prototyping, shipping, done]
+
+**The Problem:** [What problem does this objective address? Why does it matter?]
+
+**Options to Explore:**
+- [Option A — pros, cons, what you'd need to test]
+- [Option B — pros, cons, what you'd need to test]
+
+**Findings So Far:**
+- [What you've learned. Date-stamp significant findings.]
+
+**Next Steps:**
+1. [Concrete next action]
+2. [Another action]
+
+**Principle:** [A guiding rule for how to approach this objective.]
+
+---
+
+## 2. [Another Objective] (ACTIVE)
+
+**Status:** [State]
+
+**The Context:** [Why this matters.]
+
+**What I Need to Learn:**
+- [Questions to answer]
+
+**What I Can Build:**
+- [Concrete outputs]
+
+**Principle:** [Guiding rule.]
+
+---
+
+## 3. [Third Objective] (ONGOING)
+
+**Status:** [State — "ongoing" means no fixed endpoint]
+
+**What I've Noticed So Far:**
+- [Observations, patterns, early signals]
+
+**What I Want to Avoid:**
+- [Anti-patterns, failure modes]
+
+**The Approach:** [How you're tackling this.]
+
+---
+
+## Tools
+
+- [Tool name] — [What it does]. Usage: `[command]`
+- [Another tool] — [What it does]. Usage: `[command]`

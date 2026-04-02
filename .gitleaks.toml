@@ -1,0 +1,8 @@
+# Gitleaks config for Seed
+# Allowlist template/example tokens that are intentionally in the repo
+
+[allowlist]
+  description = "Template example tokens"
+  paths = [
+    '''.claude/templates/documents/API-DESIGN\.md'''
+  ]

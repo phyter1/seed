@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.seed.heartbeat</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>SEED_DIR/packages/heartbeat/heartbeat.sh</string>
+  </array>
+
+  <!-- Run every 30 minutes (1800 seconds) -->
+  <key>StartInterval</key>
+  <integer>1800</integer><!-- interval -->
+
+  <!-- Run once at load -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>WorkingDirectory</key>
+  <string>SEED_DIR</string>
+
+  <key>StandardOutPath</key>
+  <string>SEED_DIR/logs/launchd-stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>SEED_DIR/logs/launchd-stderr.log</string>
+
+  <key>KeepAlive</key>
+  <false/>
+
+  <!-- Allow up to 25 minutes per heartbeat -->
+  <key>TimeOut</key>
+  <integer>1500</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>HOME_DIR</string>
+    <key>PATH</key>
+    <string>HOME_DIR/.local/bin:HOME_DIR/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>SEED_DIR</key>
+    <string>SEED_DIR</string>
+  </dict>
+</dict>
+</plist>

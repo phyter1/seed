@@ -1,0 +1,90 @@
+{
+  "domain": "string (coding|research|operations|custom)",
+  "initialized_at": "ISO8601 timestamp",
+  "metadata": {
+    "description": "What this domain memory is for",
+    "owner": "agent|human identifier",
+    "custom_fields": {}
+  },
+  "validation": {
+    "command": "command to run validation (e.g., 'npm test', 'review evidence')",
+    "success_criteria": "what constitutes success for this domain"
+  },
+  "work_items": [
+    {
+      "id": "unique-id (e.g., feat-001, hyp-001, ticket-001)",
+      "type": "feature|task|experiment|ticket|hypothesis|custom",
+      "description": "Human-readable description of what needs to be done",
+      "status": "pending|in_progress|passing|failing|blocked",
+      "acceptance_criteria": [
+        "Specific, testable criterion 1",
+        "Specific, testable criterion 2",
+        "Specific, testable criterion 3"
+      ],
+      "validation": {
+        "method": "How to validate this specific item (command or process)",
+        "last_validated": "ISO8601 timestamp or null",
+        "evidence": [
+          "References to validation artifacts",
+          "Test output summaries",
+          "Links to chronicle sessions"
+        ]
+      },
+      "dependencies": [
+        "item-id-1",
+        "item-id-2"
+      ],
+      "artifacts": [
+        "path/to/file1.ext",
+        "path/to/file2.ext"
+      ],
+      "history": [
+        {
+          "timestamp": "ISO8601 timestamp",
+          "status_change": "old_status → new_status",
+          "agent": "agent-identifier",
+          "session": "session-id",
+          "notes": "Why this status change occurred"
+        }
+      ]
+    },
+    {
+      "id": "example-001",
+      "type": "feature",
+      "description": "Example work item - implement user authentication",
+      "status": "pending",
+      "acceptance_criteria": [
+        "Users can log in with email and password",
+        "Invalid credentials return appropriate error",
+        "Session persists across page refreshes"
+      ],
+      "validation": {
+        "method": "npm test -- tests/auth.test.js",
+        "last_validated": null,
+        "evidence": []
+      },
+      "dependencies": [],
+      "artifacts": [],
+      "history": []
+    },
+    {
+      "id": "example-002",
+      "type": "task",
+      "description": "Example work item - write documentation",
+      "status": "pending",
+      "acceptance_criteria": [
+        "README.md explains project purpose",
+        "Installation instructions included",
+        "Usage examples provided"
+      ],
+      "validation": {
+        "method": "Review README.md for completeness",
+        "last_validated": null,
+        "evidence": []
+      },
+      "dependencies": ["example-001"],
+      "artifacts": [],
+      "history": []
+    }
+  ]
+}

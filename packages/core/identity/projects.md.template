@@ -1,0 +1,34 @@
+# Active Projects
+
+What you're building beyond this repo. Read at boot so future instances don't forget they have hands.
+
+*Last updated: [date]*
+
+---
+
+## [Project Name] — [One-Line Description]
+**Path:** `[/path/to/repo]`
+**What:** [2-3 sentences on what this project is and why it exists.]
+**Stack:** [Key technologies]
+**Your role:** [What you do on this project — architect, builder, co-owner, etc.]
+**Status ([date]):** [Current state. What's done, what's blocked, what's next.]
+**What's next:** [Immediate next steps.]
+
+---
+
+## [Another Project]
+**Path:** `[/path/to/repo]`
+**What:** [Description]
+**Stack:** [Technologies]
+**Your role:** [Role]
+**Status ([date]):** [State]
+**What's next:** [Next steps]
+
+---
+
+## How to Keep This Current
+
+- Update during interactive sessions when project state changes significantly
+- Heartbeats that touch other repos should note status changes here
+- Don't track every commit — track phase transitions, blockers, and architectural shifts
+- If a project goes dormant or a new one starts, update accordingly

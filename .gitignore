@@ -1,0 +1,53 @@
+# Dependencies
+node_modules/
+.bun/
+
+# Secrets & credentials
+*.pem
+*.key
+credentials.json
+keys.json
+.env
+.env.*
+!.env.example
+
+# Identity files (these are personal — don't commit to the public repo)
+# Users create these locally through their first conversation
+self.md
+continuity.md
+convictions.md
+projects.md
+objectives.md
+
+# Journal entries (personal)
+journal/entries/*.md
+journal/summaries/*.md
+!journal/entries/.gitkeep
+!journal/summaries/.gitkeep
+
+# Notes (personal)
+notes/inbox/*.md
+notes/archive/*.md
+!notes/inbox/.gitkeep
+!notes/archive/.gitkeep
+
+# Generated
+CLAUDE.md.generated
+seed.config.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Databases
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+logs/
+*.log
+
+# Build
+dist/
+build/
