@@ -6,11 +6,13 @@
  *
  * Usage:
  *   WORKER_ID=local-mlx CAPABILITY=speed INFERENCE_URL=http://localhost:8080 QUEUE_URL=http://queue-host:7654 bun run src/worker.ts
+ *   PROVIDER_ID=mlx_local WORKER_ID=local-mlx QUEUE_URL=http://queue-host:7654 bun run src/worker.ts
  *
  * Environment:
  *   WORKER_ID       — unique worker name (e.g., "local-mlx", "local-ollama", "groq-cloud")
  *   CAPABILITY      — "speed" | "reasoning" | "code" | "any"
  *   INFERENCE_URL   — inference endpoint (OpenAI-compatible), local or cloud
+ *   PROVIDER_ID     — optional provider key from seed.config.json
  *   QUEUE_URL       — queue server URL
  *   POLL_INTERVAL   — ms between polls (default: 2000)
  *   DEFAULT_MODEL   — model name if job doesn't specify one
@@ -19,14 +21,17 @@
 
 import type { Job, JobResult, Capability, RateLimits } from "./types";
 import { discoverServerWithRetry } from "./discovery";
+import { resolveWorkerConfig } from "./config";
 
-const WORKER_ID = process.env.WORKER_ID;
-const CAPABILITY = (process.env.CAPABILITY ?? "any") as Capability;
-const INFERENCE_URL = process.env.INFERENCE_URL;
-let QUEUE_URL = process.env.QUEUE_URL ?? "";
-const POLL_INTERVAL = Number(process.env.POLL_INTERVAL ?? 2000);
-const DEFAULT_MODEL = process.env.DEFAULT_MODEL ?? "";
-const API_KEY = process.env.API_KEY ?? "";
+const resolvedConfig = resolveWorkerConfig(process.env);
+const WORKER_ID = resolvedConfig.workerId;
+const CAPABILITY = resolvedConfig.capability as Capability;
+const INFERENCE_URL = resolvedConfig.inferenceUrl;
+let QUEUE_URL = resolvedConfig.queueUrl;
+const POLL_INTERVAL = resolvedConfig.pollInterval;
+const DEFAULT_MODEL = resolvedConfig.defaultModel;
+const API_KEY = resolvedConfig.apiKey;
+const PROVIDER_ID = resolvedConfig.providerId;
 
 // Rate limits — parsed from env. Format: "rpm=30,rpd=1000,tpm=12000,tpd=100000"
 function parseRateLimits(): RateLimits | undefined {
@@ -46,7 +51,7 @@ if (!WORKER_ID) {
   process.exit(1);
 }
 if (!INFERENCE_URL) {
-  console.error("INFERENCE_URL is required");
+  console.error("INFERENCE_URL is required (or provide PROVIDER_ID backed by seed.config.json)");
   process.exit(1);
 }
 
@@ -98,19 +103,7 @@ async function sendHeartbeat(): Promise<void> {
   }).catch(() => {}); // non-fatal
 }
 
-/** Determine locality from env or auto-detect from endpoint URL */
-function detectLocality(): "local" | "cloud" {
-  const explicit = process.env.LOCALITY as "local" | "cloud" | undefined;
-  if (explicit) return explicit;
-  // Auto-detect: if endpoint is an external URL, it's cloud
-  const url = INFERENCE_URL ?? "";
-  const cloudPatterns = [
-    "api.groq.com", "api.cerebras.ai", "generativelanguage.googleapis.com",
-    "openrouter.ai", "api.openai.com", "api.anthropic.com", "api.mistral.ai",
-  ];
-  return cloudPatterns.some(p => url.includes(p)) ? "cloud" : "local";
-}
-const LOCALITY = detectLocality();
+const LOCALITY = resolvedConfig.locality;
 
 async function registerWorker(): Promise<void> {
   const hostname = (
@@ -270,6 +263,7 @@ async function poll(): Promise<number> {
 async function main() {
   console.log(`[${WORKER_ID}] Starting worker`);
   console.log(`  Capability: ${CAPABILITY}`);
+  console.log(`  Provider:   ${PROVIDER_ID ?? "(unbound)"}`);
   console.log(`  Inference:  ${INFERENCE_URL}`);
 
   // Auto-discover queue server if QUEUE_URL not provided

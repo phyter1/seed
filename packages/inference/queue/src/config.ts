@@ -1,0 +1,98 @@
+import { existsSync, readFileSync } from "fs";
+import { resolve } from "path";
+import type { Capability, Locality } from "./types";
+
+interface SeedProviderConfig {
+  type: string;
+  base_url?: string;
+  locality?: Locality;
+}
+
+interface SeedModelConfig {
+  id: string;
+  provider: string;
+  tags?: string[];
+}
+
+interface SeedConfigFile {
+  providers?: Record<string, SeedProviderConfig>;
+  models?: SeedModelConfig[];
+}
+
+export interface ResolvedWorkerConfig {
+  workerId: string;
+  capability: Capability;
+  inferenceUrl: string;
+  queueUrl: string;
+  pollInterval: number;
+  defaultModel: string;
+  apiKey: string;
+  locality: Locality;
+  providerId?: string;
+}
+
+function loadSeedConfig(seedConfigPath: string): SeedConfigFile | null {
+  if (!existsSync(seedConfigPath)) return null;
+  return JSON.parse(readFileSync(seedConfigPath, "utf-8")) as SeedConfigFile;
+}
+
+function inferProviderId(config: SeedConfigFile | null, explicitProviderId: string | undefined, defaultModel: string): string | undefined {
+  if (explicitProviderId) return explicitProviderId;
+  if (!config?.models?.length || !defaultModel) return undefined;
+  return config.models.find((model) => model.id === defaultModel)?.provider;
+}
+
+function inferDefaultModel(config: SeedConfigFile | null, providerId: string | undefined, explicitDefaultModel: string): string {
+  if (explicitDefaultModel) return explicitDefaultModel;
+  if (!config?.models?.length || !providerId) return "";
+  return config.models.find((model) => model.provider === providerId)?.id ?? "";
+}
+
+function inferInferenceUrl(config: SeedConfigFile | null, providerId: string | undefined, explicitUrl: string): string {
+  if (explicitUrl) return explicitUrl;
+  if (!config?.providers || !providerId) return "";
+  return config.providers[providerId]?.base_url ?? "";
+}
+
+function inferLocality(config: SeedConfigFile | null, providerId: string | undefined, explicit: string | undefined, inferenceUrl: string): Locality {
+  if (explicit === "local" || explicit === "cloud") return explicit;
+  if (config?.providers && providerId) {
+    const fromConfig = config.providers[providerId]?.locality;
+    if (fromConfig === "local" || fromConfig === "cloud") return fromConfig;
+  }
+
+  const cloudPatterns = [
+    "api.groq.com",
+    "api.cerebras.ai",
+    "generativelanguage.googleapis.com",
+    "openrouter.ai",
+    "api.openai.com",
+    "api.anthropic.com",
+    "api.mistral.ai",
+  ];
+
+  return cloudPatterns.some((pattern) => inferenceUrl.includes(pattern)) ? "cloud" : "local";
+}
+
+export function resolveWorkerConfig(env: NodeJS.ProcessEnv): ResolvedWorkerConfig {
+  const seedConfigPath = env.SEED_CONFIG ?? resolve(import.meta.dir, "..", "..", "..", "..", "seed.config.json");
+  const config = loadSeedConfig(seedConfigPath);
+
+  const explicitProviderId = env.PROVIDER_ID ?? env.SEED_PROVIDER;
+  const defaultModel = inferDefaultModel(config, explicitProviderId, env.DEFAULT_MODEL ?? "");
+  const providerId = inferProviderId(config, explicitProviderId, defaultModel);
+  const inferenceUrl = inferInferenceUrl(config, providerId, env.INFERENCE_URL ?? "");
+  const locality = inferLocality(config, providerId, env.LOCALITY, inferenceUrl);
+
+  return {
+    workerId: env.WORKER_ID ?? "",
+    capability: (env.CAPABILITY ?? "any") as Capability,
+    inferenceUrl,
+    queueUrl: env.QUEUE_URL ?? "",
+    pollInterval: Number(env.POLL_INTERVAL ?? 2000),
+    defaultModel,
+    apiKey: env.API_KEY ?? "",
+    locality,
+    providerId,
+  };
+}
