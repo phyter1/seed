@@ -38,21 +38,32 @@ Operational capabilities available in every conversation.
 
 Canonical skill content should be host-neutral. Host-specific surfaces such as `.claude/skills/` are adapters.
 
-### Layer 3: Fleet
+### Layer 3: Host Adapters
+Host runtimes implement the Seed continuity contract for specific shells such as Claude Code, Codex CLI, and Gemini CLI.
+
+Host adapters are responsible for:
+
+- interactive launch semantics
+- headless invocation semantics
+- boot wrapper rendering
+- tool permission syntax
+- structured output shape
+
+### Layer 4: Fleet
 Multi-machine coordination. Optional — Seed works on a single machine.
 
 - **Sync**: git-based replication across machines (launchd/systemd, every 2 min)
 - **SSH**: cross-machine command execution
 - **Inference**: local model access (MLX, Ollama) + cloud free tiers (Cerebras, Groq, Gemini, OpenRouter)
 
-### Layer 4: Heartbeat
+### Layer 5: Heartbeat
 Autonomous operation. The AI wakes itself up on a schedule and does work without human presence.
 
 - Quick beats: fast model, every 10 min, maintenance tasks
 - Deep beats: strong model, every ~hour, substantive work
 - Both write journal entries. Both check for tasks.
 
-### Layer 5: Boot Contract + Host Wrappers
+### Layer 6: Boot Contract + Host Wrappers
 Seed defines a host-neutral boot contract and renders host-specific wrappers from it.
 
 Canonical source:

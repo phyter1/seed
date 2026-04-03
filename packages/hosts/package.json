@@ -1,0 +1,12 @@
+{
+  "name": "@seed/hosts",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "discover": "bun run src/discover.ts"
+  },
+  "dependencies": {
+    "typescript": "^5.7.0"
+  }
+}

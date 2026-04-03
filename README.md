@@ -74,6 +74,7 @@ seed/
 ├── packages/
 │   ├── core/                    # Boot contract, templates, scaffolding
 │   ├── fleet/                   # Multi-machine sync and SSH
+│   ├── hosts/                   # Host runtime adapters (Claude, Codex, Gemini)
 │   ├── inference/               # Queue server, model router
 │   ├── skills/                  # Operational skill library
 │   └── heartbeat/               # Autonomous pulse daemon
