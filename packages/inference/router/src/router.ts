@@ -1,90 +1,29 @@
 /**
  * Fleet Router — LLM-powered request routing across machines.
  *
- * The router model sits warm on the MLX server as the routing brain.
+ * The router model sits warm on a router-compatible endpoint as the routing brain.
  * On each request it:
  *   1. Asks the router model to pick the best model/machine
- *   2. Unloads the router model (target model load triggers this automatically on MLX)
- *   3. Serves the request on the target (local MLX or remote Ollama)
+ *   2. Forwards to the selected backend
+ *   3. Serves the request on the target (OpenAI-compatible endpoint or Ollama)
  *   4. Re-warms the router model for the next request
  *
- * Fleet manifest is loaded from fleet.config.json (see fleet.config.example.json).
+ * Config is loaded from seed.config.json when present, or falls back to
+ * the legacy fleet.config.json format.
  *
  * Exposes an OpenAI-compatible /v1/chat/completions endpoint.
  * Start: bun run src/router.ts
  */
 
-import { readFileSync, existsSync } from "fs";
-import { resolve } from "path";
+import { loadRouterConfig, type RouterModelEntry } from "./config";
 
-// ── Config Loading ─────────────────────────────────────────────────────────
-
-interface FleetConfigFile {
-  router: {
-    model: string;
-    port?: number;
-  };
-  hosts: Record<string, string>;
-  fleet: Array<{
-    machine: string;
-    host_ref: string;
-    provider: "mlx" | "ollama";
-    model: string;
-    description: string;
-    tags: string[];
-  }>;
-}
-
-interface ModelEntry {
-  machine: string;
-  host: string;
-  provider: "mlx" | "ollama";
-  model: string;
-  description: string;
-  tags: string[];
-}
-
-function loadFleetConfig(): { routerModel: string; routerPort: number; fleet: ModelEntry[]; mlxHost: string } {
-  const configPath = process.env.FLEET_CONFIG ?? resolve(import.meta.dir, "..", "fleet.config.json");
-
-  if (!existsSync(configPath)) {
-    console.error(`Fleet config not found at ${configPath}`);
-    console.error("Copy fleet.config.example.json to fleet.config.json and customize it.");
-    process.exit(1);
-  }
-
-  const raw = readFileSync(configPath, "utf-8");
-  const config: FleetConfigFile = JSON.parse(raw);
-
-  const fleet: ModelEntry[] = config.fleet.map((entry) => {
-    const host = config.hosts[entry.host_ref];
-    if (!host) {
-      console.error(`Unknown host_ref "${entry.host_ref}" in fleet config for model "${entry.model}"`);
-      process.exit(1);
-    }
-    return {
-      machine: entry.machine,
-      host,
-      provider: entry.provider,
-      model: entry.model,
-      description: entry.description,
-      tags: entry.tags,
-    };
-  });
-
-  // Determine the MLX host — the host used by the router model
-  const routerFleetEntry = fleet.find((m) => m.model === config.router.model);
-  const mlxHost = routerFleetEntry?.host ?? Object.values(config.hosts)[0];
-
-  return {
-    routerModel: config.router.model,
-    routerPort: Number(process.env.ROUTER_PORT ?? config.router.port ?? 3000),
-    fleet,
-    mlxHost,
-  };
-}
-
-const { routerModel: ROUTER_MODEL, routerPort: ROUTER_PORT, fleet: FLEET, mlxHost: MLX_HOST } = loadFleetConfig();
+const {
+  routerModel: ROUTER_MODEL,
+  routerPort: ROUTER_PORT,
+  fleet: FLEET,
+  openAICompatibleHost: OPENAI_COMPATIBLE_HOST,
+  source: CONFIG_SOURCE,
+} = loadRouterConfig();
 
 // ── Router System Prompt ────────────────────────────────────────────────────
 
@@ -118,12 +57,13 @@ interface ChatResponse {
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 }
 
-async function callMLX(
+async function callOpenAICompatible(
+  host: string,
   model: string,
   messages: ChatMessage[],
   options: { temperature?: number; maxTokens?: number } = {}
 ): Promise<ChatResponse> {
-  const res = await fetch(`http://${MLX_HOST}/v1/chat/completions`, {
+  const res = await fetch(`http://${host}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -133,7 +73,7 @@ async function callMLX(
       max_tokens: options.maxTokens ?? 2048,
     }),
   });
-  if (!res.ok) throw new Error(`MLX error: ${res.status} ${await res.text()}`);
+  if (!res.ok) throw new Error(`OpenAI-compatible endpoint ${host} error: ${res.status} ${await res.text()}`);
   const data = await res.json();
   return {
     content: data.choices?.[0]?.message?.content ?? "",
@@ -205,7 +145,7 @@ function parseRoutingDecision(raw: string): RoutingDecision | null {
   return null;
 }
 
-function resolveModel(decision: RoutingDecision): ModelEntry | null {
+function resolveModel(decision: RoutingDecision): RouterModelEntry | null {
   // Exact match first
   let entry = FLEET.find((m) => m.model === decision.model && m.machine === decision.machine);
   if (entry) return entry;
@@ -225,8 +165,8 @@ function resolveModel(decision: RoutingDecision): ModelEntry | null {
 
 const DEFAULT_MODEL = FLEET.find((m) => m.tags.includes("general") && m.tags.includes("fast")) ?? FLEET[0];
 
-async function route(messages: ChatMessage[]): Promise<RoutingDecision & { resolved: ModelEntry }> {
-  const routerResponse = await callMLX(ROUTER_MODEL, [
+async function route(messages: ChatMessage[]): Promise<RoutingDecision & { resolved: RouterModelEntry }> {
+  const routerResponse = await callOpenAICompatible(OPENAI_COMPATIBLE_HOST, ROUTER_MODEL, [
     { role: "system", content: ROUTER_SYSTEM_PROMPT },
     { role: "user", content: messages[messages.length - 1].content },
   ], { temperature: 0.1, maxTokens: 100 });
@@ -252,7 +192,7 @@ async function route(messages: ChatMessage[]): Promise<RoutingDecision & { resol
 
 async function rewarmRouter(): Promise<void> {
   try {
-    await callMLX(ROUTER_MODEL, [{ role: "user", content: "ready" }], { maxTokens: 1 });
+    await callOpenAICompatible(OPENAI_COMPATIBLE_HOST, ROUTER_MODEL, [{ role: "user", content: "ready" }], { maxTokens: 1 });
   } catch {
     // Non-critical — it'll load on next request anyway
   }
@@ -306,22 +246,25 @@ const server = Bun.serve({
       // Step 2: Forward to target
       let response: ChatResponse;
       try {
-        if (decision.resolved.provider === "mlx") {
-          // MLX auto-swaps models — router model unloads, target loads
-          response = await callMLX(decision.resolved.model, messages, { temperature, maxTokens });
+        if (decision.resolved.provider === "openai_compatible") {
+          response = await callOpenAICompatible(decision.resolved.host, decision.resolved.model, messages, { temperature, maxTokens });
         } else {
           response = await callOllama(decision.resolved.host, decision.resolved.model, messages, { temperature, maxTokens });
         }
       } catch (err) {
         console.log(`[router] target failed: ${err}, falling back to default`);
-        response = await callMLX(DEFAULT_MODEL.model, messages, { temperature, maxTokens });
+        if (DEFAULT_MODEL.provider === "openai_compatible") {
+          response = await callOpenAICompatible(DEFAULT_MODEL.host, DEFAULT_MODEL.model, messages, { temperature, maxTokens });
+        } else {
+          response = await callOllama(DEFAULT_MODEL.host, DEFAULT_MODEL.model, messages, { temperature, maxTokens });
+        }
       }
 
       const totalMs = Date.now() - start;
       console.log(`[router] done [${totalMs}ms total, ${routeMs}ms routing]`);
 
       // Step 3: Re-warm router model (fire and forget)
-      if (decision.resolved.provider === "mlx") {
+      if (decision.resolved.provider === "openai_compatible") {
         rewarmRouter();
       }
 
@@ -358,7 +301,7 @@ console.log(`
 ╠══════════════════════════════════════════════╣
 ║  Router: ${ROUTER_MODEL.slice(0, 35).padEnd(35)} ║
 ║  Fleet:  ${String(FLEET.length).padEnd(2)} models                           ║
-║  MLX:    http://${MLX_HOST.padEnd(24)} ║
+║  Source: ${CONFIG_SOURCE.padEnd(35)} ║
 ╚══════════════════════════════════════════════╝
 `);
 
