@@ -2,7 +2,7 @@
 # heartbeat.sh — Autonomous pulse
 #
 # Simple: wake up, think, do what you want.
-# Claude handles all decisions. Bash just launches it.
+# Bash handles orchestration. A configured host adapter handles execution.
 
 set -euo pipefail
 
@@ -25,8 +25,9 @@ if [ -f "$LOCK_FILE" ]; then
     rm -f "$LOCK_FILE"
   fi
 fi
+PROMPT_FILE=""
 echo $$ > "$LOCK_FILE"
-trap 'rm -f "$LOCK_FILE"' EXIT
+trap 'rm -f "$LOCK_FILE" "$PROMPT_FILE"' EXIT
 
 # PATH setup — launchd doesn't source profiles
 export PATH="$HOME/.local/bin:$HOME/.npm/bin:$HOME/.bun/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
@@ -73,13 +74,23 @@ You have notes waiting. Read them, act on them if you want, or ignore them.
 ${INBOX_NOTES}"
 fi
 
-# Run the agent
-# Adjust --model to your preferred tier:
-#   Quick beats: claude-sonnet-4-6 or claude-haiku-4-5
-#   Deep beats: claude-opus-4-6
-timeout 1500 claude -p "$PROMPT" \
-  --model claude-sonnet-4-6 \
-  --allowedTools "Read,Write,Edit,Glob,Grep,Bash,WebSearch,WebFetch,Agent" \
+PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/seed-heartbeat-prompt.XXXXXX")
+printf "%s" "$PROMPT" > "$PROMPT_FILE"
+
+HOST_ARGS=()
+[ -n "${HEARTBEAT_HOST:-}" ] && HOST_ARGS+=(--host "$HEARTBEAT_HOST")
+[ -n "${HEARTBEAT_MODEL:-}" ] && HOST_ARGS+=(--model "$HEARTBEAT_MODEL")
+
+# Run the configured host adapter
+# Configuration resolution order:
+#   1. HEARTBEAT_HOST / HEARTBEAT_MODEL env vars
+#   2. seed.config.json heartbeat.host / heartbeat.model
+#   3. seed.config.json host.heartbeat / host.default
+#   4. default host: claude
+timeout 1500 bun run "$SEED_DIR/packages/hosts/src/run-headless.ts" \
+  --seed-dir "$SEED_DIR" \
+  --prompt-file "$PROMPT_FILE" \
+  "${HOST_ARGS[@]}" \
   2>&1 | tee -a "$LOG_PATH"
 
 EXIT_CODE=${PIPESTATUS[0]}

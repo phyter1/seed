@@ -5,7 +5,7 @@ export const codexAdapter: HostAdapter = {
   id: "codex",
   displayName: "Codex CLI",
   command: "codex",
-  capabilities: ["interactive", "headless", "mcp", "tool_permissions", "structured_output"],
+  capabilities: ["interactive", "headless", "heartbeat", "mcp", "tool_permissions", "structured_output"],
 
   async detect() {
     const detection = await detectCommand("codex");

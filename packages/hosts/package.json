@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "discover": "bun run src/discover.ts"
+    "discover": "bun run src/discover.ts",
+    "run-headless": "bun run src/run-headless.ts"
   },
   "dependencies": {
     "typescript": "^5.7.0"
