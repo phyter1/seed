@@ -72,8 +72,23 @@ HAS_GIT=false; check_tool git && HAS_GIT=true
 HAS_NODE=false; check_tool node && HAS_NODE=true
 HAS_BUN=false; check_tool bun && HAS_BUN=true
 HAS_PYTHON=false; check_tool python3 && HAS_PYTHON=true
-HAS_CLAUDE=false; check_tool claude && HAS_CLAUDE=true
 HAS_OLLAMA=false; check_tool ollama && HAS_OLLAMA=true
+
+echo ""
+echo "Checking host runtimes..."
+
+HAS_CLAUDE=false; check_tool claude && HAS_CLAUDE=true
+HAS_CODEX=false; check_tool codex && HAS_CODEX=true
+HAS_GEMINI=false; check_tool gemini && HAS_GEMINI=true
+
+DEFAULT_HOST="none"
+if [ "$HAS_CLAUDE" = true ]; then
+  DEFAULT_HOST="claude"
+elif [ "$HAS_CODEX" = true ]; then
+  DEFAULT_HOST="codex"
+elif [ "$HAS_GEMINI" = true ]; then
+  DEFAULT_HOST="gemini"
+fi
 
 # --- Detect model runtimes ---
 echo ""
@@ -133,9 +148,17 @@ config = {
         'node': $( [ "$HAS_NODE" = true ] && echo "true" || echo "false" ),
         'bun': $( [ "$HAS_BUN" = true ] && echo "true" || echo "false" ),
         'python3': $( [ "$HAS_PYTHON" = true ] && echo "true" || echo "false" ),
-        'claude': $( [ "$HAS_CLAUDE" = true ] && echo "true" || echo "false" ),
         'ollama': $( [ "$HAS_OLLAMA" = true ] && echo "true" || echo "false" ),
         'mlx_lm': $( [ "$HAS_MLX_LM" = true ] && echo "true" || echo "false" ),
+    },
+    'hosts': {
+        'default': None if '$DEFAULT_HOST' == 'none' else '$DEFAULT_HOST',
+        'heartbeat': None if '$DEFAULT_HOST' == 'none' else '$DEFAULT_HOST',
+        'installed': {
+            'claude': $( [ "$HAS_CLAUDE" = true ] && echo "true" || echo "false" ),
+            'codex': $( [ "$HAS_CODEX" = true ] && echo "true" || echo "false" ),
+            'gemini': $( [ "$HAS_GEMINI" = true ] && echo "true" || echo "false" ),
+        }
     },
     'inference': {
         'ollama_running': $( [ "$OLLAMA_RUNNING" = true ] && echo "true" || echo "false" ),
@@ -158,16 +181,20 @@ MISSING=""
 [ "$HAS_GIT" = false ] && MISSING="$MISSING git"
 [ "$HAS_NODE" = false ] && MISSING="$MISSING node"
 [ "$HAS_BUN" = false ] && MISSING="$MISSING bun"
-[ "$HAS_CLAUDE" = false ] && MISSING="$MISSING claude-code"
 
 if [ -n "$MISSING" ]; then
   echo "Missing required tools:$MISSING"
   echo "Run: bash setup/install.sh"
+elif [ "$DEFAULT_HOST" = "none" ]; then
+  echo "No supported host runtime is installed."
+  echo "Install at least one of: Claude Code, Codex CLI, Gemini CLI"
+  echo "Run: bash setup/install.sh"
 else
   echo "All required tools present."
   echo ""
-  echo "Next step: open Claude Code in this directory."
-  echo "  cd $(pwd) && claude"
+  echo "Default host runtime: $DEFAULT_HOST"
+  echo "Next step: open Seed with your host runtime in this directory."
+  echo "  cd $(pwd) && $DEFAULT_HOST"
   echo ""
   echo "Your first conversation will be the beginning."
 fi

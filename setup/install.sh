@@ -66,8 +66,10 @@ install_if_missing python3 "
   fi
 "
 
-# Claude Code
+# --- Host runtimes ---
+# Seed can run through any supported host runtime. Claude and Codex install cleanly via npm.
 install_if_missing claude "npm install -g @anthropic-ai/claude-code"
+install_if_missing codex "npm install -g @openai/codex 2>/dev/null || echo 'Codex CLI install failed (optional)'"
 
 # Ollama
 install_if_missing ollama "
@@ -88,9 +90,8 @@ if [ "$ARCH" = "arm64" ] && [ "$OS" = "Darwin" ]; then
   fi
 fi
 
-# --- Optional: Codex CLI, Gemini CLI ---
-install_if_missing codex "npm install -g @openai/codex 2>/dev/null || echo 'Codex CLI install failed (optional)'"
-# Gemini via brew or npm
+# Gemini packaging is not yet normalized across platforms in this script.
+# Prefer installing it separately if you want Gemini as the default host.
 if ! command -v gemini &>/dev/null; then
   brew install gemini-cli 2>/dev/null || echo "Gemini CLI not available via brew (optional)"
 fi
