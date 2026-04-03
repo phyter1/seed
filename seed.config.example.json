@@ -1,0 +1,106 @@
+{
+  "host": {
+    "default": "claude",
+    "heartbeat": "claude",
+    "installed": {
+      "claude": true,
+      "codex": true,
+      "gemini": false
+    }
+  },
+  "heartbeat": {
+    "host": "claude",
+    "model": "claude-sonnet-4-6"
+  },
+  "providers": {
+    "mlx_local": {
+      "type": "openai_compatible",
+      "base_url": "http://machine1.local:8080/v1",
+      "locality": "local"
+    },
+    "ollama_local": {
+      "type": "ollama",
+      "base_url": "http://machine2.local:11434",
+      "locality": "local"
+    },
+    "anthropic": {
+      "type": "anthropic",
+      "locality": "cloud"
+    },
+    "openai": {
+      "type": "openai",
+      "locality": "cloud"
+    },
+    "gemini": {
+      "type": "gemini",
+      "locality": "cloud"
+    },
+    "openrouter": {
+      "type": "openai_compatible",
+      "base_url": "https://openrouter.ai/api/v1",
+      "locality": "cloud"
+    }
+  },
+  "models": [
+    {
+      "id": "claude-sonnet-4-6",
+      "provider": "anthropic",
+      "tags": ["general", "reasoning", "host:claude"],
+      "capabilities": {
+        "tools": true,
+        "structured_output": true,
+        "vision": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-5.4",
+      "provider": "openai",
+      "tags": ["code", "reasoning", "host:codex"],
+      "capabilities": {
+        "tools": true,
+        "structured_output": true,
+        "vision": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gemini-2.5-flash",
+      "provider": "gemini",
+      "tags": ["fast", "general", "host:gemini"],
+      "capabilities": {
+        "tools": true,
+        "structured_output": true,
+        "vision": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "mlx-community/Qwen3.5-9B-MLX-4bit",
+      "provider": "mlx_local",
+      "tags": ["general", "fast", "local"],
+      "capabilities": {
+        "tools": false,
+        "structured_output": false,
+        "vision": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "qwen3-coder:30b",
+      "provider": "ollama_local",
+      "tags": ["code", "local"],
+      "capabilities": {
+        "tools": false,
+        "structured_output": false,
+        "vision": false,
+        "reasoning": true
+      }
+    }
+  ],
+  "routing": {
+    "strategy": "capability_router",
+    "prefer_local": true,
+    "default_capability": "any"
+  }
+}

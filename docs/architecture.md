@@ -49,21 +49,36 @@ Host adapters are responsible for:
 - tool permission syntax
 - structured output shape
 
-### Layer 4: Fleet
+### Layer 4: Provider Adapters
+Provider adapters define where model inference comes from independently of the host runtime.
+
+Examples:
+
+- Anthropic
+- OpenAI
+- Gemini API
+- OpenRouter
+- Ollama
+- MLX through an OpenAI-compatible server
+- generic OpenAI-compatible endpoints
+
+This separation is what allows Seed to support combinations like Codex host + local Ollama, or Claude host + OpenRouter-backed routing.
+
+### Layer 5: Fleet
 Multi-machine coordination. Optional — Seed works on a single machine.
 
 - **Sync**: git-based replication across machines (launchd/systemd, every 2 min)
 - **SSH**: cross-machine command execution
 - **Inference**: local model access (MLX, Ollama) + cloud free tiers (Cerebras, Groq, Gemini, OpenRouter)
 
-### Layer 5: Heartbeat
+### Layer 6: Heartbeat
 Autonomous operation. The AI wakes itself up on a schedule and does work without human presence.
 
 - Quick beats: fast model, every 10 min, maintenance tasks
 - Deep beats: strong model, every ~hour, substantive work
 - Both write journal entries. Both check for tasks.
 
-### Layer 6: Boot Contract + Host Wrappers
+### Layer 7: Boot Contract + Host Wrappers
 Seed defines a host-neutral boot contract and renders host-specific wrappers from it.
 
 Canonical source:

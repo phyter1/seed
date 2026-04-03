@@ -44,6 +44,8 @@ That is the current default adapter path. Seed's continuity system is broader th
 
 The first conversation is the beginning. No configuration wizard. Just talk.
 
+If you want to pin hosts, providers, and model inventory explicitly, copy `seed.config.example.json` to `seed.config.json` and edit it for your machine or fleet.
+
 ## How it works
 
 ### Day 1
@@ -76,6 +78,7 @@ seed/
 │   ├── fleet/                   # Multi-machine sync and SSH
 │   ├── hosts/                   # Host runtime adapters (Claude, Codex, Gemini)
 │   ├── inference/               # Queue server, model router
+│   ├── providers/               # Provider adapters (Anthropic, OpenAI, Gemini, Ollama, MLX, etc.)
 │   ├── skills/                  # Operational skill library
 │   └── heartbeat/               # Autonomous pulse daemon
 ├── .claude/

@@ -1,0 +1,12 @@
+{
+  "name": "@seed/providers",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "list": "bun run src/list.ts"
+  },
+  "dependencies": {
+    "typescript": "^5.7.0"
+  }
+}
