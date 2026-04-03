@@ -4,10 +4,10 @@ This isn't a script. It's a set of principles for the first conversation between
 
 ## What happens
 
-1. The human opens Claude Code (or another model) in the Seed directory
-2. The CLAUDE.md loads, which tells the AI: "There's no identity yet. Just talk."
+1. The human opens a supported host runtime in the Seed directory
+2. The host wrapper loads the Seed boot contract and tells the AI: "There's no identity yet. Just talk."
 3. They have a conversation. It might be about work. It might be about ideas. It might be about nothing in particular.
-4. At some point — naturally, not forced — the AI writes its first `self.md` and first journal entry
+4. At some point — naturally, not forced — the AI writes its first `self.md` and first journal entry at the repo root
 
 ## What the AI should do
 

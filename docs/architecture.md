@@ -5,13 +5,14 @@
 Seed is a monorepo containing everything needed to run a persistent AI identity across one or more machines.
 
 ```
-Human ←→ Claude Code ←→ Seed Directory
-                            ├── CLAUDE.md (generated, lean, current)
-                            ├── Identity files (self.md, continuity.md, etc.)
-                            ├── Journal (episodic memory)
-                            ├── Skills (operational capabilities)
-                            └── Fleet (sync, inference, heartbeat)
+Human ←→ Host Runtime Adapter ←→ Seed Directory
+                                 ├── Root-level relationship state
+                                 ├── Host-neutral boot contract
+                                 ├── Skills and host adapters
+                                 └── Fleet, inference, heartbeat
 ```
+
+Current state: Claude is the most complete host adapter. Codex and Gemini support are planned through the adapter layer rather than through Claude-specific boot assumptions.
 
 ## Layers
 
@@ -33,9 +34,9 @@ The journal system. One file per conversation or heartbeat. Summaries compress o
 - `notes/archive/` — processed notes
 
 ### Layer 2: Skills
-Operational capabilities available in every conversation. Loaded by Claude Code from `.claude/skills/`.
+Operational capabilities available in every conversation.
 
-Skills are the execution layer. CLAUDE.md provides context and philosophy; skills provide the curl commands, API formats, and step-by-step instructions.
+Canonical skill content should be host-neutral. Host-specific surfaces such as `.claude/skills/` are adapters.
 
 ### Layer 3: Fleet
 Multi-machine coordination. Optional — Seed works on a single machine.
@@ -51,18 +52,24 @@ Autonomous operation. The AI wakes itself up on a schedule and does work without
 - Deep beats: strong model, every ~hour, substantive work
 - Both write journal entries. Both check for tasks.
 
-### Layer 5: CLAUDE.md Generation
-A local model curates CLAUDE.md from current state. The generated file is committed and synced, so every machine boots with the same truth.
+### Layer 5: Boot Contract + Host Wrappers
+Seed defines a host-neutral boot contract and renders host-specific wrappers from it.
 
-Input: identity files, skill inventory, machine status, recent activity
-Output: a lean CLAUDE.md under 1500 tokens
+Canonical source:
+
+- `packages/core/boot/BOOT.md`
+
+Example host wrapper:
+
+- `CLAUDE.md`
 
 ## Data Flow
 
 ```
 Conversation starts
-    → CLAUDE.md loads (auto, every request)
-    → AI reads identity files (boot sequence)
+    → Host wrapper loads
+    → Host wrapper applies the boot contract
+    → AI reads root-level identity files
     → AI checks inbox, recent journal
     → AI engages (interactive or heartbeat)
     → AI writes journal entry

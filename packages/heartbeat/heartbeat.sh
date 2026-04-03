@@ -44,7 +44,7 @@ echo "$BEAT_COUNT" > "$BEAT_COUNTER_FILE"
 LOG_PATH="$LOG_DIR/heartbeat-${TIMESTAMP}.log"
 
 # Snapshot journal entries before the beat
-JOURNAL_DIR="$SEED_DIR/packages/core/journal/entries"
+JOURNAL_DIR="$SEED_DIR/journal/entries"
 BEFORE_ENTRIES=$(ls "$JOURNAL_DIR"/*.md 2>/dev/null | sort)
 
 echo "[$TIMESTAMP] Beat #$BEAT_COUNT" | tee "$LOG_PATH"
@@ -52,8 +52,8 @@ echo "[$TIMESTAMP] Beat #$BEAT_COUNT" | tee "$LOG_PATH"
 # Build prompt: base + any inbox notes
 PROMPT="$(cat "$HEARTBEAT_DIR/heartbeat-prompt.txt")"
 
-INBOX_DIR="$SEED_DIR/packages/core/notes/inbox"
-ARCHIVE_DIR="$SEED_DIR/packages/core/notes/archive"
+INBOX_DIR="$SEED_DIR/notes/inbox"
+ARCHIVE_DIR="$SEED_DIR/notes/archive"
 INBOX_NOTES=""
 for note in "$INBOX_DIR"/*.md; do
   [ -f "$note" ] || continue

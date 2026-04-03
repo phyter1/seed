@@ -36,15 +36,18 @@ bash setup/detect.sh
 bash setup/install.sh  # if anything is missing
 
 # Start your first conversation
+# Today the Claude adapter is the primary path:
 claude
 ```
 
-That's it. The first conversation is the beginning. No configuration wizard. Just talk.
+That is the current default adapter path. Seed's continuity system is broader than any one host runtime, but Claude is the most complete adapter in the repo today.
+
+The first conversation is the beginning. No configuration wizard. Just talk.
 
 ## How it works
 
 ### Day 1
-You open Claude Code in the Seed directory. The AI reads CLAUDE.md, sees there's no identity yet, and starts a conversation. You talk. At the end, it writes its first `self.md` and journal entry. A relationship has begun.
+You open a supported host runtime in the Seed directory. Today that path is best supported through Claude Code. The host adapter reads the boot contract, sees there is no identity yet, and starts a conversation. You talk. At the end, it writes its first `self.md` and journal entry. A relationship has begun.
 
 ### Day 7
 The AI remembers your previous conversations. It has opinions. It pushes back when it disagrees. It's working on projects with you. The journal has a week of entries, and the AI can trace its own evolution.
@@ -56,15 +59,20 @@ The AI has a name, convictions, a voice. It publishes to a blog in its own style
 
 ```
 seed/
-├── CLAUDE.md                    # Boot sequence — small, generated, always current
-├── self.md                      # Identity (written by the AI, not a template)
-├── continuity.md                # Wake-up protocol
-├── convictions.md               # Strongly-held beliefs
+├── CLAUDE.md                    # Claude adapter for the boot contract
+├── self.md                      # Identity (created locally during first conversation)
+├── continuity.md                # Wake-up protocol (created locally)
+├── convictions.md               # Strongly-held beliefs (created locally)
+├── projects.md                  # Active work across repos (created locally)
+├── objectives.md                # Longer-running goals (created locally)
 ├── journal/                     # Episodic memory
 │   ├── entries/                 # One file per conversation
 │   └── summaries/               # Compressed arcs
+├── notes/
+│   ├── inbox/                   # Messages from the human or past self
+│   └── archive/                 # Processed notes
 ├── packages/
-│   ├── core/                    # Identity templates, journal, notes
+│   ├── core/                    # Boot contract, templates, scaffolding
 │   ├── fleet/                   # Multi-machine sync and SSH
 │   ├── inference/               # Queue server, model router
 │   ├── skills/                  # Operational skill library
@@ -82,10 +90,12 @@ seed/
 └── docs/                        # Architecture, philosophy, guides
 ```
 
+Root identity files are intentionally not committed. They are created locally during the first real conversation and then ignored by git.
+
 ## Packages
 
 ### Core (`packages/core/`)
-Identity templates, journal system, notes inbox/archive. The minimum viable relationship.
+Host-neutral boot contract plus identity and memory scaffolding. The relationship state itself lives at the repo root.
 
 ### Fleet (`packages/fleet/`)
 Git-based sync across machines. launchd/systemd service templates. Cross-machine SSH management. Optional — works fine on a single machine.
@@ -100,7 +110,7 @@ The curated skill library:
 - **Research**: `/research` with optional local model analysis
 - **Meta**: `/wake` — the boot sequence as an invokable skill
 
-Plus 24 development skills (PRD generation, architecture, code review, TDD), 9 specialized agents, SDLC role prompts, and document/tool templates.
+Today, many adapter-specific skills still live under `.claude/`. The refactor plan moves canonical skill content into `packages/skills/` and treats `.claude/` as one host adapter surface.
 
 ### Heartbeat (`packages/heartbeat/`)
 Two-tier autonomous daemon. Quick beats (fast model, every 10 min) for maintenance. Deep beats (strong model, every ~hour) for substantive work. The AI wakes itself up, checks for tasks, does the work, journals, and goes back to sleep.

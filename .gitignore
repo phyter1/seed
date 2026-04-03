@@ -24,6 +24,7 @@ journal/entries/*.md
 journal/summaries/*.md
 !journal/entries/.gitkeep
 !journal/summaries/.gitkeep
+!journal/summaries/index.md
 
 # Notes (personal)
 notes/inbox/*.md
