@@ -44,6 +44,7 @@ export class ControlDB {
         platform TEXT,
         memory_gb REAL,
         agent_version TEXT,
+        agent_updated_at TEXT,
         last_seen TEXT,
         last_health TEXT,
         config_version INTEGER DEFAULT 0,
@@ -186,6 +187,25 @@ export class ControlDB {
       CREATE INDEX IF NOT EXISTS idx_install_events_timestamp ON install_events(timestamp);
       CREATE INDEX IF NOT EXISTS idx_install_sessions_status ON install_sessions(status);
     `);
+
+    // --- Additive migrations for pre-existing databases ---
+    this.addColumnIfMissing("machines", "agent_updated_at", "TEXT");
+  }
+
+  /**
+   * Add a column to a table only if it doesn't already exist. Used to
+   * roll forward older databases without dropping data.
+   */
+  private addColumnIfMissing(
+    table: string,
+    column: string,
+    decl: string
+  ): void {
+    const cols = this.db
+      .prepare(`PRAGMA table_info(${table})`)
+      .all() as Array<{ name: string }>;
+    if (cols.some((c) => c.name === column)) return;
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
   }
 
   // --- Machine Registry ---
@@ -340,6 +360,15 @@ export class ControlDB {
     if (info.agent_version !== undefined) {
       sets.push("agent_version = ?");
       params.push(info.agent_version);
+      // Only bump agent_updated_at when the reported version actually
+      // changes, so operators can tell how long a machine has been
+      // running its current version.
+      const existing = this.db
+        .prepare("SELECT agent_version FROM machines WHERE id = ?")
+        .get(id) as { agent_version: string | null } | undefined;
+      if (!existing || existing.agent_version !== info.agent_version) {
+        sets.push("agent_updated_at = datetime('now')");
+      }
     }
     if (info.config_version !== undefined) {
       sets.push("config_version = ?");

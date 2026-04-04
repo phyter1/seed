@@ -9,6 +9,8 @@ import {
 import { hashToken } from "./auth";
 import { createTelemetryPipeline } from "./telemetry";
 import type { ServerWebSocket } from "bun";
+import { SEED_VERSION } from "./version";
+import { runSelfUpdate } from "./self-update";
 
 const PORT = Number(process.env.CONTROL_PORT ?? 4310);
 const DB_PATH = process.env.CONTROL_DB ?? "/data/seed-control.db";
@@ -86,7 +88,59 @@ async function main() {
   console.log(`[control] listening on ${server.hostname}:${server.port}`);
 }
 
-main().catch((err) => {
+async function runSelfUpdateSubcommand(args: string[]): Promise<void> {
+  let version: string | undefined;
+  let force = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--version" && args[i + 1]) {
+      version = args[++i];
+    } else if (a === "--force") {
+      force = true;
+    } else if (a === "--help" || a === "-h") {
+      console.log(
+        "Usage: seed-control-plane self-update [--version <tag>] [--force]"
+      );
+      process.exit(0);
+    } else {
+      console.error(`unknown argument: ${a}`);
+      process.exit(1);
+    }
+  }
+
+  try {
+    const result = await runSelfUpdate({
+      binary: "seed-control-plane",
+      version,
+      currentVersion: SEED_VERSION,
+      force,
+    });
+    if (result.updated) {
+      console.log(
+        "[control] self-update complete — exit and restart the control plane to pick up the new binary"
+      );
+    }
+    process.exit(0);
+  } catch (err: any) {
+    console.error(`[control] self-update failed: ${err?.message ?? err}`);
+    process.exit(1);
+  }
+}
+
+async function entrypoint() {
+  const subcommand = process.argv[2];
+  if (subcommand === "self-update") {
+    await runSelfUpdateSubcommand(process.argv.slice(3));
+    return;
+  }
+  if (subcommand === "--version" || subcommand === "version") {
+    console.log(SEED_VERSION);
+    process.exit(0);
+  }
+  await main();
+}
+
+entrypoint().catch((err) => {
   console.error("[control] fatal:", err);
   process.exit(1);
 });
