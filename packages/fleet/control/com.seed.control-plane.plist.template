@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd LaunchAgent for the Seed fleet control plane server.
+
+  This file is a template. `setup/install-control-plane.sh` replaces the
+  @@...@@ placeholders with the installing user's paths and writes the result
+  to ~/Library/LaunchAgents/com.seed.control-plane.plist.
+
+  Placeholders:
+    @@CONTROL_PLANE_BINARY@@  — absolute path to the seed-control-plane binary
+    @@HOME@@                  — the installing user's home directory
+    @@CONTROL_PORT@@          — TCP port for the control plane HTTP/WS server
+    @@CONTROL_DB@@            — path to the control plane SQLite database
+    @@OPERATOR_TOKEN@@        — bearer token for operator REST API calls
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.seed.control-plane</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@@CONTROL_PLANE_BINARY@@</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>@@HOME@@</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CONTROL_PORT</key>
+    <string>@@CONTROL_PORT@@</string>
+    <key>CONTROL_DB</key>
+    <string>@@CONTROL_DB@@</string>
+    <key>OPERATOR_TOKEN</key>
+    <string>@@OPERATOR_TOKEN@@</string>
+    <key>HOME</key>
+    <string>@@HOME@@</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>@@HOME@@/Library/Logs/seed-control-plane.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>@@HOME@@/Library/Logs/seed-control-plane.log</string>
+</dict>
+</plist>
