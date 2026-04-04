@@ -167,8 +167,14 @@ export function createApp(state: ControlPlaneState): Hono {
   });
 
   // Auth middleware for /v1/*
+  // `/v1/fleet/register` is intentionally exempt — machines self-register
+  // with a pre-hashed token, then an operator must approve them before
+  // they can receive config or commands. Anyone can POST here, but only
+  // an approved operator can turn a pending machine into an accepted one.
   app.use("/v1/*", async (c, next) => {
     if (!state.operatorTokenHash) return next();
+    const path = new URL(c.req.url).pathname;
+    if (path === "/v1/fleet/register") return next();
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token) return c.json({ error: "unauthorized" }, 401);
     const hash = await hashToken(token);
@@ -220,6 +226,56 @@ export function createApp(state: ControlPlaneState): Hono {
     return c.json(machine.last_health);
   });
 
+  // Machine self-registration. Called by `seed fleet join` on the machine
+  // being onboarded. The machine generates a token locally, hashes it, and
+  // sends only the hash. The machine stays in `pending` state until an
+  // operator runs `seed fleet approve <machine_id>`.
+  app.post("/v1/fleet/register", async (c) => {
+    let body: {
+      machine_id?: unknown;
+      display_name?: unknown;
+      token_hash?: unknown;
+    };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: "invalid JSON" }, 400);
+    }
+    const machineId = typeof body.machine_id === "string" ? body.machine_id.trim() : "";
+    const tokenHash = typeof body.token_hash === "string" ? body.token_hash.trim() : "";
+    const displayName =
+      typeof body.display_name === "string" ? body.display_name.trim() : undefined;
+    if (!machineId || !tokenHash) {
+      return c.json({ error: "machine_id and token_hash required" }, 400);
+    }
+    // token_hash must look like a SHA-256 hex digest
+    if (!/^[0-9a-f]{64}$/i.test(tokenHash)) {
+      return c.json({ error: "token_hash must be a 64-char hex SHA-256 digest" }, 400);
+    }
+    const existing = db.getMachine(machineId);
+    if (existing) {
+      db.audit({
+        event_type: "machine_join",
+        machine_id: machineId,
+        result: "rejected",
+        details: `machine_id already registered (status=${existing.status})`,
+      });
+      return c.json(
+        { error: `machine '${machineId}' already registered (revoke first to re-register)` },
+        409
+      );
+    }
+    const machine = db.registerMachineWithToken(machineId, tokenHash, displayName);
+    if (!machine) return c.json({ error: "registration failed" }, 500);
+    db.audit({
+      event_type: "machine_join",
+      machine_id: machineId,
+      result: "pending",
+      details: "self-registered via /v1/fleet/register, awaiting operator approval",
+    });
+    return c.json({ status: "pending", machine_id: machineId });
+  });
+
   app.post("/v1/fleet/approve/:machine_id", async (c) => {
     const machineId = c.req.param("machine_id");
     const machine = db.getMachine(machineId);
@@ -227,9 +283,21 @@ export function createApp(state: ControlPlaneState): Hono {
     if (machine.status !== "pending")
       return c.json({ error: `machine is ${machine.status}, not pending` }, 409);
 
-    const token = generateToken();
-    const hash = await hashToken(token);
-    const approved = db.approveMachine(machineId, hash);
+    // Two paths:
+    //  1. Machine pre-registered via `seed fleet join` — token_hash already stored.
+    //     We preserve it and just flip status to accepted.
+    //  2. Legacy path — agent connected without a token, control plane
+    //     registered it as pending. We generate a token and push it over WS.
+    let approved: typeof machine | null;
+    let tokenForResponse: string | null = null;
+    if (machine.token_hash) {
+      approved = db.approveMachinePreservingToken(machineId);
+    } else {
+      const token = generateToken();
+      const hash = await hashToken(token);
+      approved = db.approveMachine(machineId, hash);
+      tokenForResponse = token;
+    }
     if (!approved) return c.json({ error: "approval failed" }, 500);
 
     db.audit({
@@ -239,15 +307,22 @@ export function createApp(state: ControlPlaneState): Hono {
       result: "success",
     });
 
-    // Send token to the connected pending agent
+    // Notify the connected agent. Include the token only on the legacy
+    // path; pre-registered agents already have it.
     const conn = state.connections.get(machineId);
     if (conn) {
-      conn.ws.send(
-        JSON.stringify({ type: "approved", token, machine_id: machineId })
-      );
+      const approvedMsg: Record<string, unknown> = {
+        type: "approved",
+        machine_id: machineId,
+      };
+      if (tokenForResponse) approvedMsg.token = tokenForResponse;
+      conn.ws.send(JSON.stringify(approvedMsg));
     }
 
-    return c.json({ ...approved, token });
+    if (tokenForResponse) {
+      return c.json({ ...approved, token: tokenForResponse });
+    }
+    return c.json(approved);
   });
 
   app.post("/v1/fleet/revoke/:machine_id", (c) => {
@@ -614,7 +689,13 @@ export async function handleWsMessage(
     const token = extractBearerToken(upgradeData.authorization ?? null);
     if (token) {
       const tokenHash = await hashToken(token);
-      const machine = db.validateToken(machine_id, tokenHash);
+      // Accept either an approved machine or a pending machine that
+      // pre-registered via `seed fleet join`. Pending machines get a
+      // connection so they appear in `seed fleet status`, but config
+      // push and command dispatch stay gated on `status === 'accepted'`.
+      const machine =
+        db.validateToken(machine_id, tokenHash) ??
+        db.validatePendingToken(machine_id, tokenHash);
       if (!machine) {
         db.audit({
           event_type: "auth_failure",

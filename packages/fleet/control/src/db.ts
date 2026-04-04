@@ -167,6 +167,45 @@ export class ControlDB {
     return this.rowToMachine(row);
   }
 
+  /**
+   * Register a new machine in pending status with a pre-supplied token hash.
+   * Used by the bootstrap flow (`seed fleet join`) where the agent generates
+   * its own token client-side and only the hash is sent to the server.
+   *
+   * Returns null if a machine with the given id already exists.
+   */
+  registerMachineWithToken(
+    id: string,
+    tokenHash: string,
+    displayName?: string
+  ): Machine | null {
+    const existing = this.getMachine(id);
+    if (existing) return null;
+    const stmt = this.db.prepare(`
+      INSERT INTO machines (id, display_name, status, token_hash)
+      VALUES (?, ?, 'pending', ?)
+      RETURNING *
+    `);
+    const row = stmt.get(id, displayName ?? null, tokenHash) as any;
+    return this.rowToMachine(row);
+  }
+
+  /**
+   * Look up a pending machine by id and verify the token hash matches.
+   * Used to authenticate machines that registered via `seed fleet join`
+   * but haven't been approved yet — they can maintain a WebSocket
+   * connection so the operator can see and approve them, but the
+   * control plane won't dispatch commands or push config.
+   */
+  validatePendingToken(machineId: string, tokenHash: string): Machine | null {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM machines WHERE id = ? AND status = 'pending' AND token_hash = ?"
+      )
+      .get(machineId, tokenHash) as any;
+    return row ? this.rowToMachine(row) : null;
+  }
+
   getMachine(id: string): Machine | null {
     const row = this.db
       .prepare("SELECT * FROM machines WHERE id = ?")
@@ -197,6 +236,22 @@ export class ControlDB {
       RETURNING *
     `);
     const row = stmt.get(tokenHash, id) as any;
+    return row ? this.rowToMachine(row) : null;
+  }
+
+  /**
+   * Approve a machine that already has a token_hash from `seed fleet join`.
+   * Flips status from pending to accepted without touching the token_hash.
+   * Returns null if the machine doesn't exist, isn't pending, or has no token_hash.
+   */
+  approveMachinePreservingToken(id: string): Machine | null {
+    const stmt = this.db.prepare(`
+      UPDATE machines
+      SET status = 'accepted', updated_at = datetime('now')
+      WHERE id = ? AND status = 'pending' AND token_hash IS NOT NULL
+      RETURNING *
+    `);
+    const row = stmt.get(id) as any;
     return row ? this.rowToMachine(row) : null;
   }
 
