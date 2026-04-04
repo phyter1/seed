@@ -101,12 +101,45 @@ export interface PongMessage {
   type: "pong";
 }
 
+/**
+ * Forwarded hook payload from a CLI agent (Claude Code / Codex / Gemini)
+ * that hit the machine agent's local hook receiver.
+ *
+ * The `payload` is the raw JSON body the CLI posted. It is forwarded
+ * verbatim so the control plane can run it through the shared hook
+ * parser/normalizer pipeline.
+ */
+export interface HookEventMessage {
+  type: "hook_event";
+  machine_id: string;
+  received_at: string;
+  source_ip?: string;
+  payload: Record<string, unknown>;
+}
+
+/**
+ * Forwarded OTLP telemetry payload from a local service that hit the
+ * machine agent's local OTLP receiver.
+ *
+ * `signal` indicates which OTLP endpoint it was posted to. The payload
+ * is the raw OTLP JSON (logs or metrics) and is forwarded verbatim.
+ */
+export interface OtlpEventMessage {
+  type: "otlp_event";
+  machine_id: string;
+  received_at: string;
+  signal: "logs" | "metrics";
+  payload: Record<string, unknown>;
+}
+
 export type AgentMessage =
   | AnnounceMessage
   | HealthMessage
   | CommandResultMessage
   | ConfigAckMessage
-  | PongMessage;
+  | PongMessage
+  | HookEventMessage
+  | OtlpEventMessage;
 
 // --- WebSocket Protocol: Control Plane -> Agent ---
 
@@ -233,10 +266,36 @@ export type ActionName = (typeof ACTION_WHITELIST)[number];
 
 // --- Agent Config File ---
 
+/**
+ * Observatory proxy configuration.
+ *
+ * The machine agent can absorb the Observatory proxy role: it listens
+ * on a local HTTP port for hook payloads and OTLP telemetry from CLI
+ * agents and local services, then forwards them to the control plane
+ * over the existing agent WebSocket.
+ *
+ * When disconnected from the control plane, events are buffered
+ * (up to `buffer_max`) and flushed on reconnect.
+ */
+export interface ProxyConfig {
+  enabled: boolean;
+  listen_port: number;
+  buffer_max: number;
+  flush_interval_ms: number;
+}
+
+export const DEFAULT_PROXY_CONFIG: ProxyConfig = {
+  enabled: true,
+  listen_port: 4312,
+  buffer_max: 1000,
+  flush_interval_ms: 5000,
+};
+
 export interface AgentConfig {
   machine_id: string;
   control_url: string;
   token: string;
+  proxy?: Partial<ProxyConfig>;
 }
 
 // --- Connected Machine (in-memory state) ---
