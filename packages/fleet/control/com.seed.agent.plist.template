@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd LaunchAgent for the Seed fleet control-plane agent daemon.
+
+  This file is a template. `setup/install-agent.sh` replaces the @@...@@
+  placeholders with the installing user's paths and writes the result to
+  ~/Library/LaunchAgents/com.seed.agent.plist.
+
+  Placeholders:
+    @@SEED_REPO@@      — absolute path to the seed repo clone
+    @@BUN_PATH@@       — absolute path to the bun executable
+    @@HOME@@           — the installing user's home directory
+    @@AGENT_CONFIG@@   — path to the agent config JSON file
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.seed.agent</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@@BUN_PATH@@</string>
+    <string>run</string>
+    <string>@@SEED_REPO@@/packages/fleet/control/src/agent.ts</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>@@SEED_REPO@@</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SEED_AGENT_CONFIG</key>
+    <string>@@AGENT_CONFIG@@</string>
+    <key>HOME</key>
+    <string>@@HOME@@</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>@@HOME@@/Library/Logs/seed-agent.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>@@HOME@@/Library/Logs/seed-agent.log</string>
+</dict>
+</plist>

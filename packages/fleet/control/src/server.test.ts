@@ -122,6 +122,137 @@ describe("fleet endpoints", () => {
   });
 });
 
+describe("machine self-registration", () => {
+  const validHash = "a".repeat(64);
+
+  test("accepts a new machine and stores it as pending", async () => {
+    const res = await post("/v1/fleet/register", {
+      machine_id: "ren3",
+      display_name: "Ren 3",
+      token_hash: validHash,
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("pending");
+    expect(body.machine_id).toBe("ren3");
+
+    const machine = db.getMachine("ren3")!;
+    expect(machine.status).toBe("pending");
+    expect(machine.token_hash).toBe(validHash);
+    expect(machine.display_name).toBe("Ren 3");
+  });
+
+  test("writes an audit entry on successful registration", async () => {
+    await post("/v1/fleet/register", {
+      machine_id: "ren3",
+      token_hash: validHash,
+    });
+    const audit = db.getAuditLog({ event_type: "machine_join" });
+    expect(audit.length).toBe(1);
+    expect(audit[0].machine_id).toBe("ren3");
+    expect(audit[0].result).toBe("pending");
+  });
+
+  test("rejects duplicate machine_id with 409", async () => {
+    db.registerMachineWithToken("ren3", validHash);
+    const res = await post("/v1/fleet/register", {
+      machine_id: "ren3",
+      token_hash: "b".repeat(64),
+    });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toContain("already registered");
+    // Original token_hash is preserved
+    expect(db.getMachine("ren3")!.token_hash).toBe(validHash);
+  });
+
+  test("409 on duplicate writes a rejected audit entry", async () => {
+    db.registerMachineWithToken("ren3", validHash);
+    await post("/v1/fleet/register", {
+      machine_id: "ren3",
+      token_hash: validHash,
+    });
+    const audit = db.getAuditLog({ event_type: "machine_join" });
+    expect(audit.some((e) => e.result === "rejected")).toBe(true);
+  });
+
+  test("rejects missing fields with 400", async () => {
+    const r1 = await post("/v1/fleet/register", { token_hash: validHash });
+    expect(r1.status).toBe(400);
+    const r2 = await post("/v1/fleet/register", { machine_id: "ren3" });
+    expect(r2.status).toBe(400);
+  });
+
+  test("rejects malformed token_hash with 400", async () => {
+    const r1 = await post("/v1/fleet/register", {
+      machine_id: "ren3",
+      token_hash: "nothex",
+    });
+    expect(r1.status).toBe(400);
+    const r2 = await post("/v1/fleet/register", {
+      machine_id: "ren3",
+      token_hash: "a".repeat(63),
+    });
+    expect(r2.status).toBe(400);
+  });
+
+  test("rejects non-JSON body with 400", async () => {
+    const res = await app.request("/v1/fleet/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "not-json",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("register endpoint is exempt from operator auth", async () => {
+    // Rebuild the app with an operator token
+    stopState(state);
+    db.close();
+    cleanup();
+    db = new ControlDB(TEST_DB);
+    const opToken = await hashToken("op-secret");
+    state = createState(db, opToken);
+    app = createApp(state);
+
+    // No Authorization header — register should still work
+    const res = await post("/v1/fleet/register", {
+      machine_id: "ren3",
+      token_hash: validHash,
+    });
+    expect(res.status).toBe(200);
+
+    // But other /v1/* endpoints should still be gated
+    const gated = await req("/v1/fleet");
+    expect(gated.status).toBe(401);
+  });
+
+  test("approve of a self-registered machine preserves the client token_hash", async () => {
+    await post("/v1/fleet/register", {
+      machine_id: "ren3",
+      token_hash: validHash,
+    });
+    const res = await post("/v1/fleet/approve/ren3");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("accepted");
+    // No server-generated token is returned — the agent already has it
+    expect(body.token).toBeUndefined();
+    // Hash is the same one the client supplied at registration time
+    expect(db.getMachine("ren3")!.token_hash).toBe(validHash);
+  });
+
+  test("approve legacy pending machine still generates a token", async () => {
+    // Simulates an agent that connected without a token (old flow)
+    db.registerMachine("ren3");
+    const res = await post("/v1/fleet/approve/ren3");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.token).toBeTruthy();
+    expect(body.token.length).toBe(64);
+  });
+});
+
 describe("command validation", () => {
   test("rejects unknown action", async () => {
     db.registerMachine("ren1");
