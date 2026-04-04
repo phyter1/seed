@@ -240,6 +240,29 @@ describe("audit log", () => {
     expect(limited.length).toBe(3);
   });
 
+  test("install tables exist and accept rows", () => {
+    // Verify migration created install_sessions and install_events
+    const session = db.createInstallSession({
+      install_id: "test-install-1",
+      target: "agent",
+      os: "darwin",
+      arch: "arm64",
+    });
+    expect(session.install_id).toBe("test-install-1");
+    expect(session.status).toBe("in_progress");
+    expect(session.steps_completed).toBe(0);
+
+    const event = db.recordInstallEvent({
+      install_id: "test-install-1",
+      step: "download.binary",
+      status: "ok",
+      details: { size_bytes: 1024 },
+    });
+    expect(event.id).toBeGreaterThan(0);
+    expect(event.step).toBe("download.binary");
+    expect(event.details).toEqual({ size_bytes: 1024 });
+  });
+
   test("audit stores command_id for correlation", () => {
     const commandId = crypto.randomUUID();
     db.audit({

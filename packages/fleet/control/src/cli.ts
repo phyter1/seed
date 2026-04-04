@@ -118,6 +118,157 @@ async function cmdConfig() {
   console.log(JSON.stringify(data.config, null, 2));
 }
 
+interface InstallSessionRow {
+  install_id: string;
+  machine_id: string | null;
+  target: string;
+  os: string | null;
+  arch: string | null;
+  started_at: string;
+  completed_at: string | null;
+  status: string;
+  steps_completed: number;
+  steps_total: number | null;
+  last_step: string | null;
+  last_error: string | null;
+}
+
+interface InstallEventRow {
+  id: number;
+  install_id: string;
+  timestamp: string;
+  step: string;
+  status: string;
+  details: Record<string, unknown> | null;
+}
+
+function formatInstallRow(s: InstallSessionRow): string {
+  const id = (s.install_id ?? "-").padEnd(32);
+  const mid = (s.machine_id ?? "-").padEnd(10);
+  const target = (s.target ?? "-").padEnd(14);
+  const status = (s.status ?? "-").padEnd(12);
+  const progress = s.steps_total
+    ? `${s.steps_completed}/${s.steps_total}`
+    : `${s.steps_completed}`;
+  const progressPadded = progress.padEnd(7);
+  const last = s.last_step ?? "-";
+  return `${id} ${mid} ${target} ${status} ${progressPadded} ${last}`;
+}
+
+function printInstallTable(sessions: InstallSessionRow[]) {
+  if (sessions.length === 0) {
+    console.log("No install sessions.");
+    return;
+  }
+  console.log(
+    `${"INSTALL ID".padEnd(32)} ${"MACHINE".padEnd(10)} ${"TARGET".padEnd(14)} ${"STATUS".padEnd(12)} ${"STEPS".padEnd(7)} LAST STEP`
+  );
+  console.log("-".repeat(100));
+  for (const s of sessions) console.log(formatInstallRow(s));
+}
+
+async function cmdInstalls(args: string[]) {
+  let status: string | undefined;
+  let follow = false;
+  let events = false;
+  let installId: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--status" && args[i + 1]) {
+      status = args[++i];
+    } else if (a === "--follow") {
+      follow = true;
+    } else if (a === "--events") {
+      events = true;
+    } else if (!a.startsWith("--") && !installId) {
+      installId = a;
+    } else {
+      console.error(`Unknown argument: ${a}`);
+      process.exit(1);
+    }
+  }
+
+  if (installId) {
+    // Detail view — optionally follow events
+    if (events || follow) {
+      let since: string | undefined;
+      // First call: fetch all events, then poll with ?since=
+      const initial = await apiGet(`/v1/installs/${installId}`);
+      console.log(`Install: ${initial.session.install_id}`);
+      console.log(
+        `  machine: ${initial.session.machine_id ?? "-"}  target: ${initial.session.target}  status: ${initial.session.status}`
+      );
+      console.log(
+        `  started: ${initial.session.started_at}  last_step: ${initial.session.last_step ?? "-"}`
+      );
+      if (initial.session.last_error) {
+        console.log(`  error: ${initial.session.last_error}`);
+      }
+      console.log("");
+      console.log("Events:");
+      for (const e of initial.events as InstallEventRow[]) {
+        console.log(
+          `  ${e.timestamp} ${e.step.padEnd(24)} ${e.status.padEnd(10)} ${
+            e.details ? JSON.stringify(e.details) : ""
+          }`
+        );
+        since = e.timestamp;
+      }
+      if (!follow) return;
+
+      // Poll for new events
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const qs = since ? `?since=${encodeURIComponent(since)}` : "";
+        const res = await apiGet(`/v1/installs/${installId}/events${qs}`);
+        for (const e of res.data as InstallEventRow[]) {
+          console.log(
+            `  ${e.timestamp} ${e.step.padEnd(24)} ${e.status.padEnd(10)} ${
+              e.details ? JSON.stringify(e.details) : ""
+            }`
+          );
+          since = e.timestamp;
+        }
+        // Stop polling if session finished
+        const sessRes = await apiGet(`/v1/installs/${installId}`);
+        const st = sessRes.session.status;
+        if (st === "success" || st === "failed" || st === "aborted") {
+          console.log(`\nInstall ${st}.`);
+          return;
+        }
+      }
+    } else {
+      const data = await apiGet(`/v1/installs/${installId}`);
+      const s = data.session as InstallSessionRow;
+      console.log(formatInstallRow(s));
+      if (s.last_error) console.log(`  error: ${s.last_error}`);
+      console.log(`  (run with --events to see full event log)`);
+      return;
+    }
+  }
+
+  // List view
+  const q = status ? `?status=${encodeURIComponent(status)}` : "";
+  if (!follow) {
+    const data = await apiGet(`/v1/installs${q}`);
+    printInstallTable(data.data);
+    return;
+  }
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const data = await apiGet(`/v1/installs${q}`);
+    // Clear screen between polls
+    process.stdout.write("\x1b[2J\x1b[H");
+    console.log(`Fleet installs (refreshing every 2s, Ctrl-C to stop)`);
+    console.log("");
+    printInstallTable(data.data);
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+
 async function cmdAudit(limit: number) {
   const entries = await apiGet(`/v1/audit?limit=${limit}`);
   if (entries.length === 0) {
@@ -328,6 +479,10 @@ async function main() {
       await cmdJoin(args.slice(1));
       break;
 
+    case "installs":
+      await cmdInstalls(args.slice(1));
+      break;
+
     case "audit": {
       let limit = 100;
       const limitIdx = args.indexOf("--limit");
@@ -347,6 +502,10 @@ async function main() {
       console.log("  revoke <id>         Revoke an accepted machine");
       console.log("  config              Display current fleet config");
       console.log("  audit [--limit N]   Display recent audit entries");
+      console.log(
+        "  installs [<install_id>] [--status S] [--follow] [--events]"
+      );
+      console.log("                      Observe install sessions");
       console.log(
         "  join <url> [--machine-id <id>] [--display-name <name>]  Register this machine with a control plane"
       );

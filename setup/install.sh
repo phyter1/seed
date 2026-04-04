@@ -23,6 +23,9 @@
 #   --machine-id <id>      Machine ID (defaults to `hostname -s`)
 #   --display-name <name>  Human-readable display name (optional)
 #   --version <tag>        Pin a specific release tag (default: latest)
+#   --telemetry-url <url>  Control plane URL to report install events to.
+#                          Defaults to --control-url (http/https form).
+#                          Set to "" to disable telemetry explicitly.
 #   --dry-run              Print actions, download nothing, touch nothing
 #   -h, --help             Show this help
 
@@ -48,6 +51,9 @@ CONTROL_URL=""
 MACHINE_ID=""
 DISPLAY_NAME=""
 DRY_RUN=false
+TELEMETRY_URL=""
+TELEMETRY_URL_SET=false
+INSTALL_ID=""
 
 # ------------------------------------------------------------------------
 # Helpers
@@ -79,11 +85,87 @@ while [ $# -gt 0 ]; do
     --machine-id) MACHINE_ID="$2"; shift 2 ;;
     --display-name) DISPLAY_NAME="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
+    --telemetry-url) TELEMETRY_URL="$2"; TELEMETRY_URL_SET=true; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     -h|--help) usage ;;
     *) die "unknown argument: $1 (use --help)" ;;
   esac
 done
+
+# ------------------------------------------------------------------------
+# Install telemetry (best-effort, never blocks the install)
+# ------------------------------------------------------------------------
+# Default telemetry target: derive an http(s) URL from --control-url unless
+# the caller explicitly passed --telemetry-url (even empty, to disable).
+if [ "$TELEMETRY_URL_SET" = false ] && [ -n "$CONTROL_URL" ]; then
+  case "$CONTROL_URL" in
+    wss://*)   TELEMETRY_URL="https://${CONTROL_URL#wss://}" ;;
+    ws://*)    TELEMETRY_URL="http://${CONTROL_URL#ws://}" ;;
+    https://*|http://*) TELEMETRY_URL="$CONTROL_URL" ;;
+  esac
+fi
+# Strip trailing slash
+TELEMETRY_URL="${TELEMETRY_URL%/}"
+
+# Generate a unique install id per invocation.
+INSTALL_ID="${MACHINE_ID:-unknown}-$(date +%Y%m%dT%H%M%S)-${RANDOM}"
+
+# report_event <step> <status> [<details-json>]
+# Always logs to stderr. If telemetry is configured, POST the event to the
+# control plane. Returns 2 if the control plane responded with a retry
+# suggestion. Exits 2 if the control plane signals abort.
+report_event() {
+  local step="$1"
+  local status="$2"
+  local details="${3:-{\}}"
+
+  printf '\033[1;90m[telemetry]\033[0m %s %s: %s\n' \
+    "$(date +%H:%M:%S)" "$step" "$status" >&2
+
+  [ -z "$TELEMETRY_URL" ] && return 0
+  [ "$DRY_RUN" = true ] && return 0
+
+  local payload
+  payload=$(cat <<JSON
+{
+  "install_id": "$INSTALL_ID",
+  "machine_id": "$MACHINE_ID",
+  "target": "agent",
+  "os": "${OS:-unknown}",
+  "arch": "${ARCH:-unknown}",
+  "step": "$step",
+  "status": "$status",
+  "details": $details,
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+JSON
+)
+
+  local response
+  response=$(curl -sfS --max-time 5 -X POST \
+    "$TELEMETRY_URL/v1/install/event" \
+    -H "Content-Type: application/json" \
+    -d "$payload" 2>/dev/null) || return 0
+
+  [ -z "$response" ] && return 0
+
+  if printf '%s' "$response" | grep -q '"abort":true'; then
+    error "Control plane signaled abort: $response"
+    exit 2
+  fi
+
+  if [ "$status" = "failed" ]; then
+    local retry_delay
+    retry_delay=$(printf '%s' "$response" | grep -oE '"delay_ms":[0-9]+' \
+      | head -n1 | cut -d: -f2)
+    if [ -n "$retry_delay" ]; then
+      warn "Control plane suggests retry in ${retry_delay}ms"
+      return 2
+    fi
+  fi
+
+  return 0
+}
 
 # ------------------------------------------------------------------------
 # OS + architecture detection
@@ -134,6 +216,13 @@ case "$OS" in
 esac
 
 [ -z "$MACHINE_ID" ] && MACHINE_ID="$(hostname -s)"
+# Update the install id now that we have a real machine id.
+INSTALL_ID="${MACHINE_ID}-$(date +%Y%m%dT%H%M%S)-${RANDOM}"
+
+report_event "install.started" "ok" \
+  "{\"os\":\"$OS\",\"arch\":\"$ARCH\",\"version\":\"$VERSION\"}"
+report_event "detect.environment" "ok" \
+  "{\"os\":\"$OS\",\"arch\":\"$ARCH\",\"machine_id\":\"$MACHINE_ID\"}"
 
 info "Seed turnkey agent install"
 info "  repo:        $REPO"
@@ -177,12 +266,21 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 download() {
   local asset="$1" dest="$2"
   info "Downloading $asset"
+  report_event "download.binary" "started" "{\"asset\":\"$asset\"}"
   if [ "$DRY_RUN" = true ]; then
     printf '  + curl -sSLf -o %s %s/%s\n' "$dest" "$BASE" "$asset"
+    report_event "download.binary" "ok" "{\"asset\":\"$asset\",\"dry_run\":true}"
     return 0
   fi
-  curl -sSLf -o "$dest" "$BASE/$asset" \
-    || die "failed to download $asset"
+  if ! curl -sSLf -o "$dest" "$BASE/$asset"; then
+    report_event "download.binary" "failed" \
+      "{\"asset\":\"$asset\",\"error_type\":\"network_error\",\"url\":\"$BASE/$asset\"}"
+    die "failed to download $asset"
+  fi
+  local size
+  size=$(stat -f%z "$dest" 2>/dev/null || stat -c%s "$dest" 2>/dev/null || echo 0)
+  report_event "download.binary" "ok" \
+    "{\"asset\":\"$asset\",\"size_bytes\":$size}"
 }
 
 download "$AGENT_ASSET" "$TMP_DIR/$AGENT_ASSET"
@@ -202,15 +300,23 @@ sha256_of() {
 
 if [ "$DRY_RUN" = false ]; then
   info "Verifying SHA-256 checksums"
+  report_event "verify.checksum" "started" "{}"
   for asset in "$AGENT_ASSET" "$CLI_ASSET"; do
     expected="$(grep " $asset\$" "$TMP_DIR/$CHECKSUMS_ASSET" | awk '{print $1}')"
-    [ -n "$expected" ] || die "no checksum entry for $asset"
+    if [ -z "$expected" ]; then
+      report_event "verify.checksum" "failed" \
+        "{\"asset\":\"$asset\",\"error_type\":\"checksum_mismatch\",\"error\":\"no entry\"}"
+      die "no checksum entry for $asset"
+    fi
     actual="$(sha256_of "$TMP_DIR/$asset")"
     if [ "$expected" != "$actual" ]; then
+      report_event "verify.checksum" "failed" \
+        "{\"asset\":\"$asset\",\"error_type\":\"checksum_mismatch\",\"expected\":\"$expected\",\"actual\":\"$actual\"}"
       die "checksum mismatch for $asset: expected $expected, got $actual"
     fi
     info "  ok  $asset"
   done
+  report_event "verify.checksum" "ok" "{}"
 else
   info "Skipping checksum verification (dry run)"
 fi
@@ -219,9 +325,11 @@ fi
 # Install binaries to ~/.local/bin
 # ------------------------------------------------------------------------
 info "Installing binaries to $BIN_DIR"
+report_event "install.binary" "started" "{\"dest\":\"$BIN_DIR\"}"
 run "mkdir -p '$BIN_DIR'"
 run "install -m 0755 '$TMP_DIR/$AGENT_ASSET' '$BIN_DIR/seed-agent'"
 run "install -m 0755 '$TMP_DIR/$CLI_ASSET' '$BIN_DIR/seed'"
+report_event "install.binary" "ok" "{\"dest\":\"$BIN_DIR\"}"
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) : ;;
@@ -238,9 +346,15 @@ if [ -n "$CONTROL_URL" ]; then
     info "  (delete it if you want to re-join a different control plane)"
   else
     info "Registering machine with control plane"
+    report_event "config.generate" "started" "{}"
     JOIN_ARGS="fleet join '$CONTROL_URL' --machine-id '$MACHINE_ID'"
     [ -n "$DISPLAY_NAME" ] && JOIN_ARGS="$JOIN_ARGS --display-name '$DISPLAY_NAME'"
-    run "'$BIN_DIR/seed' $JOIN_ARGS"
+    if ! run "'$BIN_DIR/seed' $JOIN_ARGS"; then
+      report_event "config.generate" "failed" \
+        "{\"error_type\":\"network_error\",\"error\":\"seed fleet join failed\"}"
+      die "failed to register with control plane"
+    fi
+    report_event "config.generate" "ok" "{\"config\":\"$AGENT_CONFIG\"}"
   fi
 else
   info "No --control-url provided; skipping registration step"
@@ -254,6 +368,7 @@ fi
 case "$OS" in
   darwin)
     info "Installing launchd plist at $PLIST_PATH"
+    report_event "service.install" "started" "{\"manager\":\"launchd\",\"path\":\"$PLIST_PATH\"}"
     run "mkdir -p '$HOME/Library/LaunchAgents' '$HOME/Library/Logs' '$CONFIG_DIR'"
 
     PLIST_CONTENTS=$(cat <<EOF
@@ -300,14 +415,22 @@ EOF
       mv "$PLIST_PATH.tmp" "$PLIST_PATH"
     fi
 
+    report_event "service.install" "ok" "{\"manager\":\"launchd\"}"
     info "Loading launchd service $SERVICE_LABEL"
+    report_event "service.start" "started" "{\"manager\":\"launchd\",\"label\":\"$SERVICE_LABEL\"}"
     # Unload first so a re-run picks up any plist changes; ignore failure.
     run "launchctl unload '$PLIST_PATH' 2>/dev/null || true"
-    run "launchctl load '$PLIST_PATH'"
+    if ! run "launchctl load '$PLIST_PATH'"; then
+      report_event "service.start" "failed" \
+        "{\"manager\":\"launchd\",\"error_type\":\"permission_denied\",\"error\":\"launchctl load failed\"}"
+      die "launchctl load failed"
+    fi
+    report_event "service.start" "ok" "{\"manager\":\"launchd\"}"
     ;;
 
   linux)
     info "Installing systemd user unit at $SYSTEMD_UNIT_PATH"
+    report_event "service.install" "started" "{\"manager\":\"systemd\",\"path\":\"$SYSTEMD_UNIT_PATH\"}"
     run "mkdir -p '$(dirname "$SYSTEMD_UNIT_PATH")' '$LINUX_LOG_DIR' '$CONFIG_DIR'"
 
     SYSTEMD_CONTENTS=$(cat <<EOF
@@ -348,11 +471,20 @@ EOF
       run "sudo loginctl enable-linger '$USER'"
     fi
 
+    report_event "service.install" "ok" "{\"manager\":\"systemd\"}"
     info "Reloading systemd user daemon and starting service"
+    report_event "service.start" "started" "{\"manager\":\"systemd\",\"unit\":\"seed-agent.service\"}"
     run "systemctl --user daemon-reload"
-    run "systemctl --user enable --now seed-agent.service"
+    if ! run "systemctl --user enable --now seed-agent.service"; then
+      report_event "service.start" "failed" \
+        "{\"manager\":\"systemd\",\"error_type\":\"permission_denied\",\"error\":\"systemctl enable --now failed\"}"
+      die "systemctl enable --now seed-agent.service failed"
+    fi
+    report_event "service.start" "ok" "{\"manager\":\"systemd\"}"
     ;;
 esac
+
+report_event "install.complete" "ok" "{\"machine_id\":\"$MACHINE_ID\"}"
 
 # ------------------------------------------------------------------------
 # Next steps
