@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd LaunchAgent for the Seed memory service.
+
+  Runs on the memory host (ren1) under the user's login session. The
+  installer replaces the @@...@@ placeholders with concrete paths.
+
+  Placeholders:
+    @@MEMORY_BINARY@@   — absolute path to the seed-memory binary
+    @@HOME@@            — the installing user's home directory
+    @@MEMORY_PORT@@     — TCP port (default 19888)
+    @@MEMORY_DB@@       — path to the memory SQLite database
+    @@MEMORY_SEED_DB@@  — optional path to a seed backup db (copied on first run)
+    @@SEED_EMBED_URL@@  — Ollama URL (default http://localhost:11434)
+    @@SEED_LLM_URL@@    — fleet-router URL (default http://ren3.local:3000)
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.seed.memory</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@@MEMORY_BINARY@@</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>@@HOME@@</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MEMORY_PORT</key>
+    <string>@@MEMORY_PORT@@</string>
+    <key>MEMORY_DB</key>
+    <string>@@MEMORY_DB@@</string>
+    <key>MEMORY_SEED_DB</key>
+    <string>@@MEMORY_SEED_DB@@</string>
+    <key>SEED_EMBED_URL</key>
+    <string>@@SEED_EMBED_URL@@</string>
+    <key>SEED_LLM_URL</key>
+    <string>@@SEED_LLM_URL@@</string>
+    <key>HOME</key>
+    <string>@@HOME@@</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>@@HOME@@/Library/Logs/seed-memory.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>@@HOME@@/Library/Logs/seed-memory.log</string>
+</dict>
+</plist>

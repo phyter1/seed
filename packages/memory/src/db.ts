@@ -51,10 +51,17 @@ export class MemoryDB {
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA busy_timeout = 5000");
 
-    // Load sqlite-vec extension
+    // Load sqlite-vec extension. Prefer an explicit path (for compiled
+    // binaries that ship vec0 alongside the executable), then fall back
+    // to the node-resolvable path inside node_modules.
     let hasVec = false;
+    const explicitVec = process.env.SEED_VEC_PATH;
     try {
-      sqliteVec.load(this.db);
+      if (explicitVec) {
+        this.db.loadExtension(explicitVec);
+      } else {
+        sqliteVec.load(this.db);
+      }
       hasVec = true;
     } catch (err) {
       console.warn(`[memory] sqlite-vec not available: ${err}. Vector search disabled.`);
