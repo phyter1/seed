@@ -1,6 +1,6 @@
 {
   "name": "@seed/fleet-control",
-  "version": "0.1.0",
+  "version": "0.2.2",
   "type": "module",
   "scripts": {
     "server": "bun run src/main.ts",

@@ -133,6 +133,28 @@ describe("machine registry", () => {
     expect(machine.memory_gb).toBe(16);
     expect(machine.agent_version).toBe("0.1.0");
     expect(machine.config_version).toBe(3);
+    // First time we set agent_version — agent_updated_at should be populated.
+    expect(machine.agent_updated_at).not.toBeNull();
+  });
+
+  test("updateMachineInfo bumps agent_updated_at only when version changes", async () => {
+    db.registerMachine("ren1");
+    db.updateMachineInfo("ren1", { agent_version: "0.1.0" });
+    const first = db.getMachine("ren1")!;
+    const firstStamp = first.agent_updated_at;
+    expect(firstStamp).not.toBeNull();
+
+    // Same version re-reported: stamp should not move.
+    await new Promise((r) => setTimeout(r, 1100));
+    db.updateMachineInfo("ren1", { agent_version: "0.1.0" });
+    const second = db.getMachine("ren1")!;
+    expect(second.agent_updated_at).toBe(firstStamp);
+
+    // New version: stamp advances.
+    db.updateMachineInfo("ren1", { agent_version: "0.2.0" });
+    const third = db.getMachine("ren1")!;
+    expect(third.agent_version).toBe("0.2.0");
+    expect(third.agent_updated_at).not.toBe(firstStamp);
   });
 
   test("updateLastHealth stores and retrieves health JSON", () => {

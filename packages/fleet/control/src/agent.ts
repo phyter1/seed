@@ -33,8 +33,10 @@ import type {
 } from "./types";
 import { ACTION_WHITELIST, DEFAULT_PROXY_CONFIG } from "./types";
 import { createProxy, type ProxyHandle, type WsSender } from "./proxy";
+import { SEED_VERSION } from "./version";
+import { runSelfUpdate } from "./self-update";
 
-const AGENT_VERSION = "0.1.0";
+const AGENT_VERSION = SEED_VERSION;
 const HEALTH_INTERVAL_MS = 30_000;
 const BREAK_GLASS_PORT = 4311;
 
@@ -518,11 +520,49 @@ function createCommandHandlers(): Map<string, CommandHandler> {
     return { success: true, output: "restarting" };
   });
 
+  handlers.set("agent.update", async (params) => {
+    const version =
+      typeof params.version === "string" ? params.version : undefined;
+    const force = params.force === true;
+    try {
+      const result = await runSelfUpdate({
+        binary: "seed-agent",
+        version,
+        currentVersion: AGENT_VERSION,
+        force,
+      });
+      if (result.updated) {
+        // Exit shortly after responding so the supervisor restarts us
+        // with the new binary. 1s gives the result message time to flush
+        // over the WebSocket.
+        setTimeout(() => {
+          console.log(
+            "[agent] exiting after self-update, supervisor will restart"
+          );
+          process.exit(0);
+        }, 1000);
+        return {
+          success: true,
+          output: `updated ${result.fromVersion} -> ${result.toVersion}, restarting`,
+        };
+      }
+      return {
+        success: true,
+        output: `already at ${result.toVersion}, no-op`,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        output: `self-update failed: ${err?.message ?? err}`,
+      };
+    }
+  });
+
   // Stub handlers for actions that need OS-level integration
   for (const action of [
     "service.start", "service.stop", "service.restart",
     "model.load", "model.unload", "model.swap",
-    "repo.pull", "agent.update",
+    "repo.pull",
   ] as const) {
     handlers.set(action, async (params) => {
       // Validate params have required fields based on action
@@ -921,7 +961,63 @@ async function runAgent() {
   connect();
 }
 
-runAgent().catch((err) => {
+// --- Subcommand Dispatch ---
+
+async function runSelfUpdateSubcommand(args: string[]): Promise<void> {
+  let version: string | undefined;
+  let force = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--version" && args[i + 1]) {
+      version = args[++i];
+    } else if (a === "--force") {
+      force = true;
+    } else if (a === "--help" || a === "-h") {
+      console.log(
+        "Usage: seed-agent self-update [--version <tag>] [--force]"
+      );
+      process.exit(0);
+    } else {
+      console.error(`unknown argument: ${a}`);
+      process.exit(1);
+    }
+  }
+
+  try {
+    const result = await runSelfUpdate({
+      binary: "seed-agent",
+      version,
+      currentVersion: AGENT_VERSION,
+      force,
+    });
+    if (result.updated) {
+      console.log(
+        "[agent] self-update complete — exiting so supervisor restarts with the new binary"
+      );
+      process.exit(0);
+    } else {
+      process.exit(0);
+    }
+  } catch (err: any) {
+    console.error(`[agent] self-update failed: ${err?.message ?? err}`);
+    process.exit(1);
+  }
+}
+
+async function entrypoint() {
+  const subcommand = process.argv[2];
+  if (subcommand === "self-update") {
+    await runSelfUpdateSubcommand(process.argv.slice(3));
+    return;
+  }
+  if (subcommand === "--version" || subcommand === "version") {
+    console.log(AGENT_VERSION);
+    process.exit(0);
+  }
+  await runAgent();
+}
+
+entrypoint().catch((err) => {
   console.error("[agent] fatal:", err);
   process.exit(1);
 });

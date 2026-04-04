@@ -15,6 +15,8 @@
  */
 
 import { generateToken, hashToken } from "./auth";
+import { SEED_VERSION, SEED_REPO } from "./version";
+import { fetchRelease, runSelfUpdate } from "./self-update";
 
 function getControlUrl(): string {
   return (
@@ -78,10 +80,14 @@ async function cmdStatus() {
     return;
   }
 
+  // Compare against this CLI's own version — assumes the operator
+  // has at least as recent a build as the fleet should be running.
+  const latest = SEED_VERSION;
+
   console.log(
-    `${"ID".padEnd(12)} ${"STATUS".padEnd(10)} ${"CONNECTED".padEnd(11)} ${"ARCH".padEnd(10)} ${"MEM".padEnd(8)} ${"LAST SEEN"}`
+    `${"ID".padEnd(12)} ${"STATUS".padEnd(10)} ${"CONNECTED".padEnd(11)} ${"ARCH".padEnd(10)} ${"MEM".padEnd(8)} ${"VERSION".padEnd(10)} ${"LAST SEEN"}`
   );
-  console.log("-".repeat(75));
+  console.log("-".repeat(90));
 
   for (const m of machines) {
     const connected = m.connected ? "yes" : "no";
@@ -90,10 +96,16 @@ async function cmdStatus() {
     const lastSeen = m.last_seen
       ? new Date(m.last_seen + "Z").toLocaleString()
       : "-";
+    const ver = m.agent_version ?? "-";
+    const marker =
+      m.agent_version && m.agent_version !== latest ? " ⚠" : "  ";
+    const verCell = `${ver}${marker}`.padEnd(10);
     console.log(
-      `${m.id.padEnd(12)} ${m.status.padEnd(10)} ${connected.padEnd(11)} ${arch.padEnd(10)} ${mem.padEnd(8)} ${lastSeen}`
+      `${m.id.padEnd(12)} ${m.status.padEnd(10)} ${connected.padEnd(11)} ${arch.padEnd(10)} ${mem.padEnd(8)} ${verCell} ${lastSeen}`
     );
   }
+  console.log("");
+  console.log(`CLI version: ${SEED_VERSION}  (⚠ = agent behind CLI version)`);
 }
 
 async function cmdApprove(machineId: string) {
@@ -407,6 +419,230 @@ function dirname(p: string): string {
   return i === -1 ? "." : p.slice(0, i);
 }
 
+// --- Fleet Upgrade ---
+
+interface FleetMachineRow {
+  id: string;
+  status: string;
+  connected?: boolean;
+  arch: string | null;
+  platform: string | null;
+  agent_version: string | null;
+}
+
+interface UpgradeOptions {
+  targetVersion?: string; // tag like "v0.3.0"; default latest
+  machineId?: string; // upgrade only this machine
+  dryRun: boolean;
+  parallel: number; // how many to dispatch concurrently
+  timeoutMs: number; // per-machine version-landed timeout
+}
+
+function parseUpgradeArgs(args: string[]): UpgradeOptions {
+  const opts: UpgradeOptions = {
+    dryRun: false,
+    parallel: 1,
+    timeoutMs: 120_000,
+  };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--version" && args[i + 1]) {
+      opts.targetVersion = args[++i];
+    } else if (a === "--machine" && args[i + 1]) {
+      opts.machineId = args[++i];
+    } else if (a === "--dry-run") {
+      opts.dryRun = true;
+    } else if (a === "--parallel" && args[i + 1]) {
+      const n = parseInt(args[++i], 10);
+      if (!isNaN(n) && n > 0) opts.parallel = n;
+    } else if (a === "--timeout" && args[i + 1]) {
+      const n = parseInt(args[++i], 10);
+      if (!isNaN(n) && n > 0) opts.timeoutMs = n * 1000;
+    } else if (a === "--help" || a === "-h") {
+      console.log(
+        "Usage: seed fleet upgrade [--version <tag>] [--machine <id>] [--dry-run] [--parallel N] [--timeout SECONDS]"
+      );
+      process.exit(0);
+    } else {
+      console.error(`unknown argument: ${a}`);
+      process.exit(1);
+    }
+  }
+  return opts;
+}
+
+async function waitForVersion(
+  machineId: string,
+  targetVersion: string,
+  timeoutMs: number
+): Promise<{ ok: boolean; observed: string | null }> {
+  const deadline = Date.now() + timeoutMs;
+  let lastObserved: string | null = null;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 3000));
+    try {
+      const m = (await apiGet(
+        `/v1/fleet/${machineId}`
+      )) as FleetMachineRow & { connected?: boolean };
+      lastObserved = m.agent_version ?? null;
+      if (m.connected && m.agent_version === targetVersion) {
+        return { ok: true, observed: lastObserved };
+      }
+    } catch {
+      // connection dropped during upgrade is expected; keep polling
+    }
+  }
+  return { ok: false, observed: lastObserved };
+}
+
+async function upgradeOneMachine(
+  machineId: string,
+  tag: string,
+  targetVersion: string,
+  timeoutMs: number
+): Promise<{ machineId: string; ok: boolean; message: string }> {
+  process.stdout.write(`  ${machineId}: dispatching agent.update ${tag}... `);
+  try {
+    await apiPost(`/v1/fleet/${machineId}/command`, {
+      action: "agent.update",
+      params: { version: tag },
+      timeout_ms: 60_000,
+    });
+  } catch (err: any) {
+    const message = `dispatch failed: ${err?.message ?? err}`;
+    console.log(`FAIL (${message})`);
+    return { machineId, ok: false, message };
+  }
+  process.stdout.write("dispatched. waiting for reconnect... ");
+  const { ok, observed } = await waitForVersion(
+    machineId,
+    targetVersion,
+    timeoutMs
+  );
+  if (ok) {
+    console.log(`OK (${observed})`);
+    return { machineId, ok: true, message: `upgraded to ${observed}` };
+  }
+  console.log(`TIMEOUT (last observed: ${observed ?? "none"})`);
+  return {
+    machineId,
+    ok: false,
+    message: `timeout; last observed version: ${observed ?? "none"}`,
+  };
+}
+
+async function cmdUpgrade(args: string[]) {
+  const opts = parseUpgradeArgs(args);
+
+  // Resolve target release via the GitHub API.
+  console.log(
+    `Resolving release ${opts.targetVersion ?? "latest"} from ${SEED_REPO}...`
+  );
+  const release = await fetchRelease(opts.targetVersion ?? "latest");
+  console.log(`Target: ${release.tag} (${release.version})`);
+
+  // List machines.
+  const machines = (await apiGet("/v1/fleet")) as FleetMachineRow[];
+  let candidates = machines.filter((m) => m.connected && m.status === "accepted");
+  if (opts.machineId) {
+    candidates = candidates.filter((m) => m.id === opts.machineId);
+    if (candidates.length === 0) {
+      console.error(
+        `machine '${opts.machineId}' is not a connected, accepted fleet member`
+      );
+      process.exit(1);
+    }
+  }
+
+  const toUpgrade = candidates.filter(
+    (m) => m.agent_version !== release.version
+  );
+  const skipped = candidates.filter(
+    (m) => m.agent_version === release.version
+  );
+
+  console.log("");
+  console.log("Plan:");
+  for (const m of toUpgrade) {
+    console.log(
+      `  [upgrade] ${m.id}: ${m.agent_version ?? "unknown"} -> ${release.version}`
+    );
+  }
+  for (const m of skipped) {
+    console.log(`  [skip]    ${m.id}: already at ${release.version}`);
+  }
+  const disconnected = machines.filter(
+    (m) => !m.connected && m.status === "accepted"
+  );
+  if (!opts.machineId) {
+    for (const m of disconnected) {
+      console.log(`  [offline] ${m.id}: not connected, skipping`);
+    }
+  }
+
+  if (opts.dryRun || toUpgrade.length === 0) {
+    if (toUpgrade.length === 0) console.log("\nNothing to do.");
+    return;
+  }
+
+  console.log("");
+  console.log(`Upgrading ${toUpgrade.length} machine(s)...`);
+
+  // Process in batches of opts.parallel.
+  const results: Array<{ machineId: string; ok: boolean; message: string }> = [];
+  for (let i = 0; i < toUpgrade.length; i += opts.parallel) {
+    const batch = toUpgrade.slice(i, i + opts.parallel);
+    const batchResults = await Promise.all(
+      batch.map((m) =>
+        upgradeOneMachine(m.id, release.tag, release.version, opts.timeoutMs)
+      )
+    );
+    results.push(...batchResults);
+  }
+
+  console.log("");
+  console.log("Summary:");
+  const ok = results.filter((r) => r.ok);
+  const failed = results.filter((r) => !r.ok);
+  for (const r of ok) console.log(`  ✓ ${r.machineId}: ${r.message}`);
+  for (const r of failed) console.log(`  ✗ ${r.machineId}: ${r.message}`);
+  if (failed.length > 0) process.exit(1);
+}
+
+// --- Self-update (for the CLI binary itself) ---
+
+async function cmdSelfUpdate(args: string[]) {
+  let version: string | undefined;
+  let force = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--version" && args[i + 1]) {
+      version = args[++i];
+    } else if (a === "--force") {
+      force = true;
+    } else {
+      console.error(`unknown argument: ${a}`);
+      process.exit(1);
+    }
+  }
+  try {
+    const result = await runSelfUpdate({
+      binary: "seed-cli",
+      version,
+      currentVersion: SEED_VERSION,
+      force,
+    });
+    if (result.updated) {
+      console.log(
+        `seed-cli updated ${result.fromVersion} -> ${result.toVersion}`
+      );
+    }
+  } catch (err: any) {
+    console.error(`self-update failed: ${err?.message ?? err}`);
+    process.exit(1);
+  }
+}
+
 async function cmdJoin(args: string[]) {
   const controlUrl = args[0];
   if (!controlUrl || controlUrl.startsWith("--")) {
@@ -481,6 +717,19 @@ async function main() {
       await cmdJoin(args.slice(1));
       break;
 
+    case "upgrade":
+      await cmdUpgrade(args.slice(1));
+      break;
+
+    case "self-update":
+      await cmdSelfUpdate(args.slice(1));
+      break;
+
+    case "version":
+    case "--version":
+      console.log(SEED_VERSION);
+      break;
+
     case "installs":
       await cmdInstalls(args.slice(1));
       break;
@@ -504,6 +753,13 @@ async function main() {
       console.log("  revoke <id>         Revoke an accepted machine");
       console.log("  config              Display current fleet config");
       console.log("  audit [--limit N]   Display recent audit entries");
+      console.log(
+        "  upgrade [--version <tag>] [--machine <id>] [--dry-run] [--parallel N]"
+      );
+      console.log("                      Roll out a new agent version across the fleet");
+      console.log("  self-update [--version <tag>] [--force]");
+      console.log("                      Update the seed CLI binary in place");
+      console.log("  version             Print CLI version");
       console.log(
         "  installs [<install_id>] [--status S] [--follow] [--events]"
       );
