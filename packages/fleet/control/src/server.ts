@@ -7,80 +7,98 @@ import type {
   ControlMessage,
   HealthReport,
   AuditEventType,
+  EventCategory,
+  ServiceType,
+  SessionStatus,
 } from "./types";
 import { ACTION_WHITELIST } from "./types";
+import type { TelemetryPipeline } from "./telemetry";
+import {
+  detectServiceType,
+  normalizeHookPayload,
+  normalizeLogRecord,
+  normalizeMetricDataPoint,
+  type OtlpAttribute,
+  type OtlpLogRecord,
+  type OtlpLogsPayload,
+  type OtlpMetricDataPoint,
+  type OtlpMetricsPayload,
+} from "./normalizer";
 
 const PING_INTERVAL_MS = 30_000;
 const MAX_MISSED_PONGS = 3;
 const HEALTH_PERSIST_INTERVAL_MS = 5 * 60_000;
 
-/**
- * Pluggable sink for telemetry events forwarded by machine agents.
- *
- * Task 3 only forwards these events — the real telemetry pipeline
- * (normalizer, event bus, session tracker, storage) lands in Task 2.
- * Until then the default sink just counts messages so operators can
- * verify the proxy is working end to end.
- */
-export interface TelemetrySink {
-  onHookEvent: (
-    machineId: string,
-    payload: Record<string, unknown>,
-    receivedAt: string
-  ) => void;
-  onOtlpEvent: (
-    machineId: string,
-    signal: "logs" | "metrics",
-    payload: Record<string, unknown>,
-    receivedAt: string
-  ) => void;
-}
-
-export interface TelemetryCounts {
-  hook_events: number;
-  otlp_events: number;
-}
-
-export function createCountingTelemetrySink(): TelemetrySink & {
-  counts: TelemetryCounts;
-} {
-  const counts: TelemetryCounts = { hook_events: 0, otlp_events: 0 };
-  return {
-    counts,
-    onHookEvent: () => {
-      counts.hook_events++;
-    },
-    onOtlpEvent: () => {
-      counts.otlp_events++;
-    },
-  };
+/** WS object used by the dashboard broadcaster. */
+export interface DashboardWsLike {
+  send: (data: string) => void;
+  close: (code?: number, reason?: string) => void;
 }
 
 export interface ControlPlaneState {
   connections: Map<string, ConnectedMachine>;
   /** Reverse lookup: ws object identity → machine_id */
   wsToMachine: Map<object, string>;
+  /** Connected dashboard clients (for broadcasting telemetry events). */
+  dashboardClients: Set<DashboardWsLike>;
   db: ControlDB;
+  telemetry: TelemetryPipeline | null;
   startedAt: number;
   operatorTokenHash: string | null;
-  telemetry: TelemetrySink;
   pingInterval?: ReturnType<typeof setInterval>;
   healthPersistInterval?: ReturnType<typeof setInterval>;
+  telemetryUnsubscribers: Array<() => void>;
 }
 
 export function createState(
   db: ControlDB,
   operatorTokenHash?: string,
-  telemetry?: TelemetrySink
+  telemetry?: TelemetryPipeline
 ): ControlPlaneState {
   const state: ControlPlaneState = {
     connections: new Map(),
     wsToMachine: new Map(),
+    dashboardClients: new Set(),
     db,
+    telemetry: telemetry ?? null,
     startedAt: Date.now(),
     operatorTokenHash: operatorTokenHash ?? null,
-    telemetry: telemetry ?? createCountingTelemetrySink(),
+    telemetryUnsubscribers: [],
   };
+
+  // Wire telemetry pipeline → dashboard broadcaster
+  if (telemetry) {
+    state.telemetryUnsubscribers.push(
+      telemetry.onEvent((event) => {
+        broadcastToDashboards(state, {
+          type: "agent.event",
+          session_id: event.session_id,
+          service_type: event.service_type,
+          event_type: event.event_type,
+          event_name: event.event_name,
+          detail: event.detail,
+          token_count: event.token_count,
+          cost_cents: event.cost_cents,
+          source: event.source,
+          timestamp: event.timestamp.toISOString(),
+        });
+      }),
+      telemetry.onAgentDetected((e) => {
+        const session = db.getSession(e.session_id);
+        broadcastToDashboards(state, {
+          type: "agent.detected",
+          session,
+          timestamp: e.started_at,
+        });
+      }),
+      telemetry.onAnomaly((a) => {
+        broadcastToDashboards(state, {
+          type: "agent.anomaly",
+          anomaly: a,
+        });
+      })
+    );
+  }
 
   // Ping all connected agents every 30s
   state.pingInterval = setInterval(() => {
@@ -117,6 +135,24 @@ export function createState(
 export function stopState(state: ControlPlaneState): void {
   if (state.pingInterval) clearInterval(state.pingInterval);
   if (state.healthPersistInterval) clearInterval(state.healthPersistInterval);
+  for (const unsub of state.telemetryUnsubscribers) unsub();
+  state.telemetryUnsubscribers = [];
+}
+
+/** Broadcast a JSON-serializable message to all connected dashboard clients. */
+export function broadcastToDashboards(
+  state: ControlPlaneState,
+  msg: unknown
+): void {
+  if (state.dashboardClients.size === 0) return;
+  const raw = JSON.stringify(msg);
+  for (const ws of state.dashboardClients) {
+    try {
+      ws.send(raw);
+    } catch {
+      state.dashboardClients.delete(ws);
+    }
+  }
 }
 
 // --- REST API ---
@@ -319,6 +355,212 @@ export function createApp(state: ControlPlaneState): Hono {
     return c.json(config);
   });
 
+  // --- Telemetry: OTLP ingestion ---
+  // These endpoints are intentionally OUTSIDE the /v1/* auth scope so that
+  // OTLP-emitting processes (CLI agents, the fleet router) on the same trust
+  // domain can push without shipping operator credentials. Auth can be added
+  // later via a bearer token per service if needed.
+
+  app.post("/otlp/v1/logs", async (c) => {
+    if (!state.telemetry) return c.json({ error: "telemetry disabled" }, 503);
+    const contentType = c.req.header("Content-Type") ?? "";
+    if (contentType.includes("application/x-protobuf")) {
+      return c.json(
+        { error: "only application/json is supported" },
+        415
+      );
+    }
+
+    let body: OtlpLogsPayload;
+    try {
+      body = (await c.req.json()) as OtlpLogsPayload;
+    } catch {
+      return c.json({ error: "invalid JSON" }, 400);
+    }
+
+    if (!body || !Array.isArray(body.resourceLogs)) {
+      return c.json({ error: "resourceLogs array required" }, 400);
+    }
+
+    let accepted = 0;
+    let skipped = 0;
+    for (const resourceLog of body.resourceLogs) {
+      const resourceAttrs = resourceLog.resource?.attributes;
+      for (const scopeLog of resourceLog.scopeLogs ?? []) {
+        for (const record of scopeLog.logRecords ?? []) {
+          const normalized = normalizeLogRecord(record, resourceAttrs);
+          if (!normalized.session_id) {
+            skipped++;
+            continue;
+          }
+          state.telemetry.ingest(normalized);
+          accepted++;
+        }
+      }
+    }
+
+    return c.json({ accepted, skipped }, 200);
+  });
+
+  app.post("/otlp/v1/metrics", async (c) => {
+    if (!state.telemetry) return c.json({ error: "telemetry disabled" }, 503);
+    const contentType = c.req.header("Content-Type") ?? "";
+    if (contentType.includes("application/x-protobuf")) {
+      return c.json(
+        { error: "only application/json is supported" },
+        415
+      );
+    }
+
+    let body: OtlpMetricsPayload;
+    try {
+      body = (await c.req.json()) as OtlpMetricsPayload;
+    } catch {
+      return c.json({ error: "invalid JSON" }, 400);
+    }
+
+    if (!body || !Array.isArray(body.resourceMetrics)) {
+      return c.json({ error: "resourceMetrics array required" }, 400);
+    }
+
+    let accepted = 0;
+    let skipped = 0;
+    for (const resourceMetric of body.resourceMetrics) {
+      const resourceAttrs = resourceMetric.resource?.attributes;
+      for (const scopeMetric of resourceMetric.scopeMetrics ?? []) {
+        for (const metric of scopeMetric.metrics ?? []) {
+          const dataPoints =
+            metric.sum?.dataPoints ?? metric.gauge?.dataPoints ?? [];
+          for (const dp of dataPoints) {
+            const normalized = normalizeMetricDataPoint(
+              metric.name,
+              dp,
+              resourceAttrs
+            );
+            if (!normalized.session_id) {
+              skipped++;
+              continue;
+            }
+            state.telemetry.ingest(normalized);
+            accepted++;
+          }
+        }
+      }
+    }
+
+    return c.json({ accepted, skipped }, 200);
+  });
+
+  // --- Telemetry: Hook receiver ---
+  // Accepts hook payloads from CLI agents (Claude Code, Codex, Gemini).
+  // Accepts direct hook POSTs; the machine-agent proxy may relay these too.
+  app.post("/api/v1/hooks", async (c) => {
+    if (!state.telemetry) return c.json({ error: "telemetry disabled" }, 503);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON" }, 400);
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return c.json({ error: "body must be a JSON object" }, 400);
+    }
+
+    const machineId = c.req.header("X-Machine-Id") ?? undefined;
+    const normalized = normalizeHookPayload(
+      body as Record<string, unknown>,
+      machineId
+    );
+    if (!normalized) {
+      return c.json({ error: "unrecognized hook payload" }, 400);
+    }
+    if (!normalized.session_id) {
+      return c.json({ received: true, skipped: "no session id" }, 200);
+    }
+    state.telemetry.ingest(normalized);
+    return c.json({ received: true });
+  });
+
+  // --- Telemetry: Dashboard API ---
+
+  app.get("/api/v1/agents", (c) => {
+    const serviceType = c.req.query("service_type") as ServiceType | undefined;
+    const status = c.req.query("status") as SessionStatus | undefined;
+    const sessionKind = c.req.query("session_kind") as
+      | "cli"
+      | "inference"
+      | undefined;
+    const limit = Math.max(
+      1,
+      Math.min(200, Number(c.req.query("limit") ?? 50))
+    );
+    const offset = Math.max(0, Number(c.req.query("offset") ?? 0));
+
+    const { sessions, total } = db.listSessions({
+      service_type: serviceType,
+      status,
+      session_kind: sessionKind,
+      limit,
+      offset,
+    });
+
+    return c.json({
+      data: sessions,
+      pagination: { total, limit, offset, has_more: offset + limit < total },
+    });
+  });
+
+  app.get("/api/v1/agents/:id", (c) => {
+    const session = db.getSession(c.req.param("id"));
+    if (!session) return c.json({ error: "not found" }, 404);
+    return c.json(session);
+  });
+
+  app.get("/api/v1/agents/:id/events", (c) => {
+    const id = c.req.param("id");
+    const cursor = c.req.query("cursor")
+      ? Number(c.req.query("cursor"))
+      : undefined;
+    const eventType = c.req.query("event_type") as EventCategory | undefined;
+    const limit = Math.max(
+      1,
+      Math.min(200, Number(c.req.query("limit") ?? 50))
+    );
+
+    const result = db.getSessionEvents(id, {
+      cursor,
+      event_type: eventType,
+      limit,
+    });
+    if (!result) return c.json({ error: "not found" }, 404);
+
+    return c.json({
+      data: result.events,
+      pagination: {
+        has_more: result.has_more,
+        next_cursor: result.next_cursor,
+      },
+    });
+  });
+
+  app.get("/api/v1/costs/summary", (c) => {
+    return c.json(db.getCostSummary());
+  });
+
+  app.get("/api/v1/costs", (c) => {
+    const period =
+      (c.req.query("period") as "today" | "week" | "month" | "all") ?? "today";
+    const groupBy =
+      (c.req.query("group_by") as "session" | "service_type") ?? "service_type";
+    if (!["today", "week", "month", "all"].includes(period)) {
+      return c.json({ error: "invalid period" }, 400);
+    }
+    if (!["session", "service_type"].includes(groupBy)) {
+      return c.json({ error: "invalid group_by" }, 400);
+    }
+    return c.json(db.getCostBreakdown(period, groupBy));
+  });
+
   // --- Audit ---
 
   app.get("/v1/audit", (c) => {
@@ -508,11 +750,14 @@ export async function handleWsMessage(
       );
       return;
     }
-    state.telemetry.onHookEvent(
-      existingMachineId,
-      msg.payload,
-      msg.received_at
+    if (!state.telemetry) return;
+    const normalized = normalizeHookPayload(
+      msg.payload as Record<string, unknown>,
+      existingMachineId
     );
+    if (normalized && normalized.session_id) {
+      state.telemetry.ingest(normalized);
+    }
     return;
   }
 
@@ -523,12 +768,62 @@ export async function handleWsMessage(
       );
       return;
     }
-    state.telemetry.onOtlpEvent(
-      existingMachineId,
-      msg.signal,
-      msg.payload,
-      msg.received_at
-    );
+    if (!state.telemetry) return;
+    const payload = msg.payload as
+      | { resourceLogs?: unknown[]; resourceMetrics?: unknown[] }
+      | undefined;
+    if (!payload || typeof payload !== "object") return;
+
+    if (msg.signal === "logs" && Array.isArray(payload.resourceLogs)) {
+      for (const resourceLog of payload.resourceLogs as Array<{
+        resource?: { attributes?: unknown };
+        scopeLogs?: Array<{ logRecords?: unknown[] }>;
+      }>) {
+        const resourceAttrs = resourceLog.resource?.attributes as
+          | OtlpAttribute[]
+          | undefined;
+        for (const scopeLog of resourceLog.scopeLogs ?? []) {
+          for (const record of (scopeLog.logRecords ?? []) as OtlpLogRecord[]) {
+            const normalized = normalizeLogRecord(record, resourceAttrs);
+            if (normalized.session_id) {
+              state.telemetry.ingest(normalized);
+            }
+          }
+        }
+      }
+    } else if (
+      msg.signal === "metrics" &&
+      Array.isArray(payload.resourceMetrics)
+    ) {
+      for (const resourceMetric of payload.resourceMetrics as Array<{
+        resource?: { attributes?: unknown };
+        scopeMetrics?: Array<{ metrics?: unknown[] }>;
+      }>) {
+        const resourceAttrs = resourceMetric.resource?.attributes as
+          | OtlpAttribute[]
+          | undefined;
+        for (const scopeMetric of resourceMetric.scopeMetrics ?? []) {
+          for (const metric of (scopeMetric.metrics ?? []) as Array<{
+            name: string;
+            sum?: { dataPoints?: unknown[] };
+            gauge?: { dataPoints?: unknown[] };
+          }>) {
+            const dataPoints =
+              metric.sum?.dataPoints ?? metric.gauge?.dataPoints ?? [];
+            for (const dp of dataPoints as OtlpMetricDataPoint[]) {
+              const normalized = normalizeMetricDataPoint(
+                metric.name,
+                dp,
+                resourceAttrs
+              );
+              if (normalized && normalized.session_id) {
+                state.telemetry.ingest(normalized);
+              }
+            }
+          }
+        }
+      }
+    }
     return;
   }
 }
@@ -547,4 +842,22 @@ export function handleWsClose(
     state.connections.delete(machineId);
     state.wsToMachine.delete(ws);
   }
+  state.dashboardClients.delete(ws as DashboardWsLike);
+}
+
+// --- Dashboard WebSocket ---
+
+/** Register a dashboard client (called on /ws/dashboard upgrade). */
+export function registerDashboardClient(
+  ws: DashboardWsLike,
+  state: ControlPlaneState
+): void {
+  state.dashboardClients.add(ws);
+}
+
+export function unregisterDashboardClient(
+  ws: DashboardWsLike,
+  state: ControlPlaneState
+): void {
+  state.dashboardClients.delete(ws);
 }

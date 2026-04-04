@@ -626,60 +626,34 @@ describe("forwarded telemetry (hook_event / otlp_event)", () => {
     );
   }
 
-  test("hook_event is routed to telemetry sink", async () => {
-    const fakeWs = { send: () => {}, close: () => {} };
-    await announceRen1(fakeWs);
-
-    await handleWsMessage(
-      fakeWs,
-      JSON.stringify({
-        type: "hook_event",
-        machine_id: "ren1",
-        received_at: new Date().toISOString(),
-        payload: { event: "PreToolUse", session_id: "abc" },
-      }),
-      state,
-      {}
-    );
-
-    const sink = state.telemetry as any;
-    expect(sink.counts.hook_events).toBe(1);
-  });
-
-  test("otlp_event is routed to telemetry sink with signal", async () => {
-    const fakeWs = { send: () => {}, close: () => {} };
-    await announceRen1(fakeWs);
-
-    await handleWsMessage(
-      fakeWs,
-      JSON.stringify({
-        type: "otlp_event",
-        machine_id: "ren1",
-        received_at: new Date().toISOString(),
-        signal: "logs",
-        payload: { resourceLogs: [] },
-      }),
-      state,
-      {}
-    );
-    await handleWsMessage(
-      fakeWs,
-      JSON.stringify({
-        type: "otlp_event",
-        machine_id: "ren1",
-        received_at: new Date().toISOString(),
-        signal: "metrics",
-        payload: { resourceMetrics: [] },
-      }),
-      state,
-      {}
-    );
-
-    const sink = state.telemetry as any;
-    expect(sink.counts.otlp_events).toBe(2);
-  });
+  function makeRecordingPipeline() {
+    const ingested: any[] = [];
+    const pipeline = {
+      bus: {} as any,
+      sessions: {} as any,
+      costs: {} as any,
+      anomalies: {} as any,
+      ingest: (event: any) => {
+        ingested.push(event);
+      },
+      start: () => {},
+      stop: () => {},
+      onAgentDetected: () => () => {},
+      onAnomaly: () => () => {},
+      onEvent: () => () => {},
+    };
+    return { pipeline, ingested };
+  }
 
   test("hook_event with spoofed machine_id is dropped", async () => {
+    stopState(state);
+    db.close();
+    cleanup();
+    db = new ControlDB(TEST_DB);
+    const { pipeline, ingested } = makeRecordingPipeline();
+    state = createState(db, undefined, pipeline as any);
+    app = createApp(state);
+
     const fakeWs = { send: () => {}, close: () => {} };
     await announceRen1(fakeWs);
 
@@ -689,14 +663,13 @@ describe("forwarded telemetry (hook_event / otlp_event)", () => {
         type: "hook_event",
         machine_id: "ren2", // WS is authenticated as ren1
         received_at: new Date().toISOString(),
-        payload: { event: "PreToolUse" },
+        payload: { event: "PreToolUse", session_id: "abc" },
       }),
       state,
       {}
     );
 
-    const sink = state.telemetry as any;
-    expect(sink.counts.hook_events).toBe(0);
+    expect(ingested.length).toBe(0);
   });
 
   test("hook_event before announce is dropped", async () => {
@@ -721,26 +694,15 @@ describe("forwarded telemetry (hook_event / otlp_event)", () => {
     );
 
     expect(closed).toBe(true);
-    const sink = state.telemetry as any;
-    expect(sink.counts.hook_events).toBe(0);
   });
 
-  test("custom telemetry sink receives full event details", async () => {
+  test("hook_event with valid payload is normalized and ingested", async () => {
     stopState(state);
     db.close();
     cleanup();
     db = new ControlDB(TEST_DB);
-
-    const hookEvents: Array<{ machineId: string; payload: any }> = [];
-    const otlpEvents: Array<{ machineId: string; signal: string; payload: any }> = [];
-    state = createState(db, undefined, {
-      onHookEvent: (machineId, payload) => {
-        hookEvents.push({ machineId, payload });
-      },
-      onOtlpEvent: (machineId, signal, payload) => {
-        otlpEvents.push({ machineId, signal, payload });
-      },
-    });
+    const { pipeline, ingested } = makeRecordingPipeline();
+    state = createState(db, undefined, pipeline as any);
     app = createApp(state);
 
     const fakeWs = { send: () => {}, close: () => {} };
@@ -752,16 +714,74 @@ describe("forwarded telemetry (hook_event / otlp_event)", () => {
         type: "hook_event",
         machine_id: "ren1",
         received_at: new Date().toISOString(),
-        payload: { event: "PostToolUse", tool: "Bash" },
+        payload: {
+          event: "PostToolUse",
+          session_id: "test-session-1",
+          tool: "Bash",
+        },
       }),
       state,
       {}
     );
 
-    expect(hookEvents.length).toBe(1);
-    expect(hookEvents[0].machineId).toBe("ren1");
-    expect(hookEvents[0].payload.event).toBe("PostToolUse");
-    expect(hookEvents[0].payload.tool).toBe("Bash");
+    expect(ingested.length).toBe(1);
+    expect(ingested[0].session_id).toBe("test-session-1");
+  });
+
+  test("otlp_event with empty payload ingests nothing", async () => {
+    stopState(state);
+    db.close();
+    cleanup();
+    db = new ControlDB(TEST_DB);
+    const { pipeline, ingested } = makeRecordingPipeline();
+    state = createState(db, undefined, pipeline as any);
+    app = createApp(state);
+
+    const fakeWs = { send: () => {}, close: () => {} };
+    await announceRen1(fakeWs);
+
+    await handleWsMessage(
+      fakeWs,
+      JSON.stringify({
+        type: "otlp_event",
+        machine_id: "ren1",
+        received_at: new Date().toISOString(),
+        signal: "logs",
+        payload: { resourceLogs: [] },
+      }),
+      state,
+      {}
+    );
+
+    expect(ingested.length).toBe(0);
+  });
+
+  test("otlp_event with spoofed machine_id is dropped", async () => {
+    stopState(state);
+    db.close();
+    cleanup();
+    db = new ControlDB(TEST_DB);
+    const { pipeline, ingested } = makeRecordingPipeline();
+    state = createState(db, undefined, pipeline as any);
+    app = createApp(state);
+
+    const fakeWs = { send: () => {}, close: () => {} };
+    await announceRen1(fakeWs);
+
+    await handleWsMessage(
+      fakeWs,
+      JSON.stringify({
+        type: "otlp_event",
+        machine_id: "ren2",
+        received_at: new Date().toISOString(),
+        signal: "logs",
+        payload: { resourceLogs: [{ scopeLogs: [] }] },
+      }),
+      state,
+      {}
+    );
+
+    expect(ingested.length).toBe(0);
   });
 });
 

@@ -228,7 +228,9 @@ export type AuditEventType =
   | "machine_join"
   | "machine_approve"
   | "machine_revoke"
-  | "auth_failure";
+  | "auth_failure"
+  | "anomaly_cost_spike"
+  | "anomaly_token_rate";
 
 export interface AuditEntry {
   id: number;
@@ -241,6 +243,118 @@ export interface AuditEntry {
   result: string | null;
   details: string | null;
   command_id: string | null;
+}
+
+// --- Telemetry / Observability ---
+
+/**
+ * Service/CLI type for an agent session.
+ * - CLI agents run on developer machines: claude, codex, gemini
+ * - Inference sources are backend services: fleet-router, inference-worker
+ */
+export type AgentCli = "claude" | "codex" | "gemini";
+export type InferenceSource = "fleet-router" | "inference-worker";
+export type ServiceType = AgentCli | InferenceSource;
+
+export type SessionStatus =
+  | "active"
+  | "idle"
+  | "stuck"
+  | "stopped"
+  | "crashed"
+  | "completed";
+
+export type HealthLevel = "green" | "yellow" | "red";
+
+export type EventCategory =
+  | "tool_call"
+  | "tool_decision"
+  | "user_prompt"
+  | "metric"
+  | "inference_request"
+  | "status_change"
+  | "error"
+  | "unknown";
+
+export type EventSource = "otel" | "hook" | "internal";
+
+/** Normalized telemetry event — the canonical form after ingestion. */
+export interface NormalizedEvent {
+  session_id: string;
+  service_type: ServiceType;
+  event_type: EventCategory;
+  event_name: string;
+  detail: Record<string, unknown>;
+  token_count: number;
+  cost_cents: number;
+  context_usage_percent?: number;
+  source: EventSource;
+  timestamp: Date;
+  /** For inference events: which machine served it */
+  machine_id?: string;
+}
+
+/** A stored agent session (CLI agent or inference source). */
+export interface AgentSession {
+  id: string;
+  service_type: ServiceType;
+  /** Classification: 'cli' is ephemeral (one session per run); 'inference' is request-scoped/long-lived */
+  session_kind: "cli" | "inference";
+  status: SessionStatus;
+  health_level: HealthLevel;
+  machine_id: string | null;
+  current_task: string | null;
+  worktree_path: string | null;
+  total_tokens: number;
+  total_cost_cents: number;
+  context_usage_percent: number;
+  started_at: string;
+  last_event_at: string | null;
+  ended_at: string | null;
+  end_reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Aggregated metrics window for a session. */
+export interface MetricWindow {
+  id: number;
+  session_id: string;
+  window_start: string;
+  window_end: string;
+  token_count: number;
+  cost_cents: number;
+  event_count: number;
+}
+
+export interface StoredAgentEvent {
+  id: number;
+  session_id: string;
+  service_type: ServiceType;
+  event_type: EventCategory;
+  event_name: string;
+  detail: Record<string, unknown> | null;
+  token_count: number | null;
+  cost_cents: number | null;
+  source: EventSource;
+  machine_id: string | null;
+  timestamp: string;
+  created_at: string;
+}
+
+/** A parsed hook event from a local CLI. */
+export interface HookEvent {
+  cli: AgentCli;
+  event_name: string;
+  session_id?: string;
+  raw_payload: Record<string, unknown>;
+  received_at: string;
+}
+
+/** Per-CLI cost rates in cents per 1M tokens (split into prompt/completion). */
+export interface CostRate {
+  prompt_cents_per_mtok: number;
+  completion_cents_per_mtok: number;
 }
 
 // --- Action Whitelist ---
