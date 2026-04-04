@@ -795,6 +795,7 @@ export async function handleWsMessage(
       system: msg.system,
       services: msg.services,
       models: msg.models,
+      ...(msg.gpu !== undefined ? { gpu: msg.gpu } : {}),
     };
     const conn = state.connections.get(existingMachineId);
     if (conn) conn.last_health = healthReport;

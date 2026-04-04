@@ -26,6 +26,7 @@ import type {
   HealthTier,
   ServiceHealth,
   LoadedModel,
+  GpuMetrics,
   ActionName,
   CommandEnvelope,
   ProxyConfig,
@@ -362,6 +363,56 @@ async function probeService(
   return result;
 }
 
+async function collectGpuMetrics(): Promise<GpuMetrics | undefined> {
+  // nvidia-smi is the only supported path — available on Linux hosts with
+  // NVIDIA drivers. macOS and GPU-less Linux leave this field undefined.
+  try {
+    const proc = Bun.spawn(
+      [
+        "nvidia-smi",
+        "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+        "--format=csv,noheader,nounits",
+      ],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const text = (await readStream(proc.stdout)).trim();
+    await proc.exited;
+    if (proc.exitCode !== 0 || !text) return undefined;
+
+    // Use the first GPU only. Values: name, util%, used_mib, total_mib, temp_c.
+    const line = text.split("\n")[0]?.trim();
+    if (!line) return undefined;
+    const parts = line.split(",").map((p) => p.trim());
+    if (parts.length < 5) return undefined;
+
+    const name = parts[0];
+    const utilization = parseFloat(parts[1]);
+    const usedMib = parseFloat(parts[2]);
+    const totalMib = parseFloat(parts[3]);
+    const tempC = parseFloat(parts[4]);
+
+    if (
+      !name ||
+      isNaN(utilization) ||
+      isNaN(usedMib) ||
+      isNaN(totalMib) ||
+      isNaN(tempC)
+    ) {
+      return undefined;
+    }
+
+    return {
+      name,
+      utilization_percent: Math.round(utilization * 10) / 10,
+      vram_used_gb: Math.round((usedMib / 1024) * 10) / 10,
+      vram_total_gb: Math.round((totalMib / 1024) * 10) / 10,
+      temperature_c: Math.round(tempC),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 async function collectLoadedModels(): Promise<LoadedModel[]> {
   const models: LoadedModel[] = [];
 
@@ -559,6 +610,7 @@ async function runAgent() {
     }
 
     const models = await collectLoadedModels();
+    const gpu = await collectGpuMetrics();
 
     const msg: HealthMessage = {
       type: "health",
@@ -567,6 +619,7 @@ async function runAgent() {
       system,
       services,
       models,
+      ...(gpu !== undefined ? { gpu } : {}),
     };
     ws.send(JSON.stringify(msg));
   }
@@ -799,6 +852,7 @@ async function runAgent() {
   breakGlassApp.get("/status", async (c) => {
     const system = await collectSystemMetrics();
     const models = await collectLoadedModels();
+    const gpu = await collectGpuMetrics();
     const services: ServiceHealth[] = [];
     if (cachedConfig) {
       for (const svc of cachedConfig.services) {
@@ -812,6 +866,7 @@ async function runAgent() {
       system,
       services,
       models,
+      ...(gpu !== undefined ? { gpu } : {}),
     });
   });
 
