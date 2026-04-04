@@ -18,6 +18,10 @@
 #     "cores": 8,
 #     "ram_gb": 16,
 #     "can_mlx": true,
+#     "has_nvidia_gpu": false,
+#     "gpu_name": null,
+#     "vram_gb": 0,
+#     "cuda_version": null,
 #     "tools": { "bun": true, "git": true, "python3": true, "ollama": true },
 #     "runtimes": {
 #       "mlx_lm": true,
@@ -70,6 +74,34 @@ HAS_GIT=$(have git)
 HAS_PY=$(have python3)
 HAS_OLLAMA=$(have ollama)
 
+# --- NVIDIA GPU probe (Linux only; macOS leaves fields null/false) ---
+HAS_NVIDIA_GPU=false
+GPU_NAME_JSON="null"
+VRAM_GB=0
+CUDA_VERSION_JSON="null"
+
+if [ "$OS" = "linux" ] && command -v nvidia-smi >/dev/null 2>&1; then
+  # One-shot query, first GPU only.
+  NVIDIA_LINE="$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '\r')"
+  if [ -n "$NVIDIA_LINE" ]; then
+    HAS_NVIDIA_GPU=true
+    GPU_NAME="$(printf '%s' "$NVIDIA_LINE" | awk -F', *' '{print $1}')"
+    VRAM_MB="$(printf '%s' "$NVIDIA_LINE" | awk -F', *' '{print $2}')"
+    if [ -n "${VRAM_MB:-}" ] && [ "$VRAM_MB" -gt 0 ] 2>/dev/null; then
+      VRAM_GB=$(( VRAM_MB / 1024 ))
+    fi
+    # JSON-escape the GPU name (simple: strip quotes + backslashes).
+    GPU_NAME_ESCAPED="$(printf '%s' "$GPU_NAME" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+    GPU_NAME_JSON="\"$GPU_NAME_ESCAPED\""
+
+    # CUDA version from nvidia-smi banner: "CUDA Version: 12.4"
+    CUDA_VERSION="$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: *\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n1)"
+    if [ -n "${CUDA_VERSION:-}" ]; then
+      CUDA_VERSION_JSON="\"$CUDA_VERSION\""
+    fi
+  fi
+fi
+
 # --- Runtime probes ---
 MLX_LM=false
 if [ "$CAN_MLX" = true ] && command -v python3 >/dev/null 2>&1; then
@@ -101,6 +133,10 @@ JSON=$(cat <<EOF
   "cores": ${CORES},
   "ram_gb": ${RAM_GB},
   "can_mlx": ${CAN_MLX},
+  "has_nvidia_gpu": ${HAS_NVIDIA_GPU},
+  "gpu_name": ${GPU_NAME_JSON},
+  "vram_gb": ${VRAM_GB},
+  "cuda_version": ${CUDA_VERSION_JSON},
   "tools": {
     "bun": ${HAS_BUN},
     "git": ${HAS_GIT},

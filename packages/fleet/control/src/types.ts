@@ -49,12 +49,21 @@ export interface LoadedModel {
   size_gb?: number;
 }
 
+export interface GpuMetrics {
+  name: string;
+  utilization_percent: number;
+  vram_used_gb: number;
+  vram_total_gb: number;
+  temperature_c: number;
+}
+
 export interface HealthReport {
   machine_id: string;
   timestamp: string;
   system: SystemMetrics;
   services: ServiceHealth[];
   models: LoadedModel[];
+  gpu?: GpuMetrics;
 }
 
 // --- WebSocket Protocol: Agent -> Control Plane ---
@@ -79,6 +88,7 @@ export interface HealthMessage {
   system: SystemMetrics;
   services: ServiceHealth[];
   models: LoadedModel[];
+  gpu?: GpuMetrics;
 }
 
 export interface CommandResultMessage {

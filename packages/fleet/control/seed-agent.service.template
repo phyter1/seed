@@ -1,0 +1,18 @@
+[Unit]
+Description=Seed fleet agent daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@@AGENT_BINARY@@
+Restart=always
+RestartSec=10
+Environment="SEED_AGENT_CONFIG=@@AGENT_CONFIG@@"
+Environment="HOME=@@HOME@@"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+StandardOutput=append:@@HOME@@/.local/state/seed-agent/agent.log
+StandardError=append:@@HOME@@/.local/state/seed-agent/agent.log
+
+[Install]
+WantedBy=default.target

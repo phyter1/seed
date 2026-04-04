@@ -1,7 +1,7 @@
 #!/bin/bash
 # Seed — Build standalone binaries for the fleet agent, CLI, and control plane.
 #
-# Produces 6 binaries (3 programs x 2 architectures) in dist/, along with
+# Produces 9 binaries (3 programs x 3 target triples) in dist/, along with
 # SHA-256 checksums. Binaries are self-contained (Bun runtime embedded) and
 # require no external dependencies on the target machine.
 #
@@ -11,10 +11,13 @@
 # Output:
 #   dist/seed-agent-darwin-arm64
 #   dist/seed-agent-darwin-x64
+#   dist/seed-agent-linux-x64
 #   dist/seed-cli-darwin-arm64
 #   dist/seed-cli-darwin-x64
+#   dist/seed-cli-linux-x64
 #   dist/seed-control-plane-darwin-arm64
 #   dist/seed-control-plane-darwin-x64
+#   dist/seed-control-plane-linux-x64
 #   dist/checksums.txt
 
 set -euo pipefail
@@ -45,6 +48,7 @@ BUILDS=(
 TARGETS=(
   "bun-darwin-arm64:darwin-arm64"
   "bun-darwin-x64:darwin-x64"
+  "bun-linux-x64:linux-x64"
 )
 
 echo "==> Building binaries"
