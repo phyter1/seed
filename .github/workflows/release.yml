@@ -1,0 +1,85 @@
+name: Release
+
+# Publish Seed fleet binaries on version tags (v0.1.0, v1.2.3, ...).
+#
+# Each runner compiles all 6 darwin binaries (arm64 + x64 for agent, cli,
+# and control-plane). We build both architectures on both runners because
+# `bun build --compile --target=...` can cross-compile. The matrix exists
+# so we get a native-built arm64 binary from an arm64 runner (macos-latest)
+# and a native-built x64 binary from an x64 runner (macos-13). The upload
+# step only ships the native artifacts from each runner to avoid duplicate
+# release assets.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-13
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Build binaries
+        working-directory: packages/fleet/control
+        run: bash scripts/build-binaries.sh
+
+      - name: Collect native artifacts
+        working-directory: packages/fleet/control
+        run: |
+          mkdir -p release-assets
+          cp dist/seed-agent-darwin-${{ matrix.arch }} release-assets/
+          cp dist/seed-cli-darwin-${{ matrix.arch }} release-assets/
+          cp dist/seed-control-plane-darwin-${{ matrix.arch }} release-assets/
+          # Per-arch checksums file so both jobs can upload without clobbering.
+          (cd release-assets && shasum -a 256 seed-* > checksums-darwin-${{ matrix.arch }}.txt)
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: seed-binaries-darwin-${{ matrix.arch }}
+          path: packages/fleet/control/release-assets/*
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Merge checksums
+        working-directory: release-assets
+        run: |
+          cat checksums-darwin-*.txt > checksums.txt
+          rm -f checksums-darwin-*.txt
+          echo "--- checksums.txt ---"
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
