@@ -1,6 +1,4 @@
-import type { JurorResponse } from "./types.js";
-
-const MLX_DEFAULT_HOST = "Ryans-MacBook-Pro.local:8080";
+import type { JurorResponse } from "./types";
 
 interface OpenAIChatResponse {
   id: string;
@@ -131,7 +129,7 @@ export async function queryMLXChat(
   }
 }
 
-export async function listMLXModels(host: string = MLX_DEFAULT_HOST): Promise<string[]> {
+export async function listMLXModels(host: string): Promise<string[]> {
   try {
     const res = await fetch(`http://${host}/v1/models`);
     if (!res.ok) return [];

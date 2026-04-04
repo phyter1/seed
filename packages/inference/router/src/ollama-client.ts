@@ -1,4 +1,10 @@
-import type { JurorResponse } from "./types.js";
+/**
+ * Ollama HTTP client — both /api/generate (prompt) and /api/chat (messages) endpoints.
+ *
+ * Used by the router for direct Ollama calls and by jury mode for parallel inference.
+ */
+
+import type { JurorResponse } from "./types";
 
 interface OllamaGenerateResponse {
   model: string;
@@ -124,7 +130,7 @@ export async function queryOllamaChat(
   }
 }
 
-export async function listModels(host: string): Promise<string[]> {
+export async function listOllamaModels(host: string): Promise<string[]> {
   try {
     const res = await fetch(`http://${host}/api/tags`);
     if (!res.ok) return [];
