@@ -1,6 +1,67 @@
+// seed/packages/inference/router — shared types for the rule-based fleet router
+
+export type ProviderKind = "openai_compatible" | "ollama";
+
+export interface ModelEntry {
+  /** Logical machine name (e.g. "mlx_ren3", "ollama_ren1") — matches provider key in seed.config.json */
+  machine: string;
+  /** host:port for direct HTTP calls (e.g. "ren3.local:8080", "ren1.local:11434") */
+  host: string;
+  /** Provider type determines which client to use */
+  provider: ProviderKind;
+  /** Model identifier (e.g. "mlx-community/Qwen3.5-9B-MLX-4bit", "gemma4:e4b") */
+  model: string;
+  /** Tags for routing heuristics */
+  tags: string[];
+  /** Lower priority = preferred. Used for tie-breaking within the same tag match. */
+  priority: number;
+  /** For MLX models: does this entry need thinking mode enabled? */
+  thinking?: boolean;
+}
+
+export interface RoutingResult {
+  entry: ModelEntry;
+  reason: string;
+  needsThinking: boolean;
+}
+
+export interface ChatMessage {
+  role: string;
+  content: string;
+}
+
+export interface ChatResponse {
+  content: string;
+  reasoning?: string;
+  model: string;
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+}
+
+export interface JurorResult {
+  machine: string;
+  model: string;
+  content: string;
+  tokS: number;
+  wallS: number;
+  error: string | null;
+}
+
+export interface JuryResult {
+  consensus: string;
+  jurors: JurorResult[];
+  agreement: number;
+  totalMs: number;
+}
+
+// ── Legacy types preserved for compatibility with other packages ────────────
+
 export interface OllamaNode {
   name: string;
-  host: string; // e.g., "ren.local:11434"
+  host: string;
   models: string[];
 }
 
@@ -14,6 +75,12 @@ export interface JurorResponse {
   error?: string;
 }
 
+export type ConsensusStrategy =
+  | "majority"
+  | "synthesis"
+  | "best-of"
+  | "debate";
+
 export interface ConsensusResult {
   prompt: string;
   jurorCount: number;
@@ -22,19 +89,13 @@ export interface ConsensusResult {
   aggregatorModel: string;
   aggregatorDurationMs: number;
   totalDurationMs: number;
-  agreement: number; // 0-1, how much jurors agreed
+  agreement: number;
   metadata: {
     strategy: ConsensusStrategy;
     temperature: number;
     timestamp: string;
   };
 }
-
-export type ConsensusStrategy =
-  | "majority"      // Most common answer wins
-  | "synthesis"     // Aggregator synthesizes all responses
-  | "best-of"       // Aggregator picks the best single response
-  | "debate";       // Jurors see each other's answers, revise, then aggregate
 
 export interface JuryConfig {
   nodes: OllamaNode[];
@@ -46,15 +107,15 @@ export interface JuryConfig {
 }
 
 export interface JurorAssignment {
-  node: string; // must match OllamaNode.name
+  node: string;
   model: string;
 }
 
 export interface AggregatorConfig {
   provider: "ollama" | "anthropic";
   model: string;
-  node?: string; // for ollama aggregator
-  apiKey?: string; // for anthropic aggregator
+  node?: string;
+  apiKey?: string;
 }
 
 export interface BenchmarkCase {
@@ -76,5 +137,5 @@ export interface BenchmarkResult {
   jury: ConsensusResult & {
     correct?: boolean;
   };
-  improvement: boolean; // did jury beat single model?
+  improvement: boolean;
 }
