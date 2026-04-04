@@ -1,0 +1,18 @@
+{
+  "name": "@seed/fleet-control",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "server": "bun run src/main.ts",
+    "agent": "bun run src/agent.ts",
+    "cli": "bun run src/cli.ts",
+    "test": "bun test",
+    "dev": "bun --watch run src/main.ts"
+  },
+  "dependencies": {
+    "hono": "^4.7.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}
