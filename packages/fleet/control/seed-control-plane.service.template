@@ -1,0 +1,20 @@
+[Unit]
+Description=Seed fleet control plane server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@@CONTROL_PLANE_BINARY@@
+Restart=always
+RestartSec=10
+Environment="CONTROL_PORT=@@CONTROL_PORT@@"
+Environment="CONTROL_DB=@@CONTROL_DB@@"
+Environment="OPERATOR_TOKEN=@@OPERATOR_TOKEN@@"
+Environment="HOME=@@HOME@@"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+StandardOutput=append:@@HOME@@/.local/state/seed-control-plane/control-plane.log
+StandardError=append:@@HOME@@/.local/state/seed-control-plane/control-plane.log
+
+[Install]
+WantedBy=default.target
