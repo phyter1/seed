@@ -199,15 +199,22 @@ async function getPlatform(): Promise<string> {
 }
 
 async function getCpuCores(): Promise<number> {
-  const proc = Bun.spawn(["nproc"], { stdout: "pipe" });
-  const text = (await readStream(proc.stdout)).trim();
-  const n = parseInt(text, 10);
-  // nproc may not exist on macOS
-  if (isNaN(n)) {
-    const proc2 = Bun.spawn(["sysctl", "-n", "hw.ncpu"], { stdout: "pipe" });
-    return parseInt((await readStream(proc2.stdout)).trim(), 10) || 1;
+  // Try platform-appropriate command first, with try/catch because
+  // Bun.spawn throws ENOENT when the binary doesn't exist.
+  if (process.platform === "darwin") {
+    try {
+      const proc = Bun.spawn(["sysctl", "-n", "hw.ncpu"], { stdout: "pipe" });
+      const n = parseInt((await readStream(proc.stdout)).trim(), 10);
+      if (!isNaN(n)) return n;
+    } catch {}
+  } else {
+    try {
+      const proc = Bun.spawn(["nproc"], { stdout: "pipe" });
+      const n = parseInt((await readStream(proc.stdout)).trim(), 10);
+      if (!isNaN(n)) return n;
+    } catch {}
   }
-  return n;
+  return 1;
 }
 
 async function getMemoryGB(): Promise<number> {
