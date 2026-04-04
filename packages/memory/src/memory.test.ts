@@ -122,6 +122,63 @@ describe("MemoryService.query", () => {
   });
 });
 
+describe("MemoryService.deepQuery", () => {
+  test("stops when evaluator says sufficient on first pass", async () => {
+    const script = {
+      ingest: { summary: "note", entities: [], topics: [], importance: 0.6 },
+      query: "final answer",
+      evaluate: [{ sufficient: true, reason: "enough context" }],
+    };
+    const { service } = makeService(script);
+    await service.ingest("about things", "src", "p");
+    const answer = await service.query("q?", "p", { deep: true });
+    expect(answer).toBe("final answer");
+    // One evaluate call + one query call
+    const evalCalls = script.evaluate!.length;
+    expect(evalCalls).toBe(0); // shifted
+  });
+
+  test("does a second search when evaluator requests a refined query", async () => {
+    const script = {
+      ingest: { summary: "note", entities: [], topics: [], importance: 0.6 },
+      query: "synthesized answer",
+      evaluate: [
+        { sufficient: false, reason: "need more", refined_query: "something else" },
+        { sufficient: true, reason: "ok now" },
+      ],
+    };
+    const { service } = makeService(script);
+    await service.ingest("seed data", "s", "p");
+    const answer = await service.query("q?", "p", { deep: true, maxIterations: 3 });
+    expect(answer).toBe("synthesized answer");
+    // Both evaluator responses consumed
+    expect(script.evaluate!.length).toBe(0);
+  });
+
+  test("bails out after maxIterations even if still insufficient", async () => {
+    const script = {
+      ingest: { summary: "note", entities: [], topics: [], importance: 0.6 },
+      query: "best-effort answer",
+      evaluate: Array.from({ length: 5 }, () => ({
+        sufficient: false,
+        refined_query: "more more more",
+      })),
+    };
+    const { service } = makeService(script);
+    await service.ingest("data", "s", "p");
+    const answer = await service.query("q?", "p", { deep: true, maxIterations: 2 });
+    expect(answer).toBe("best-effort answer");
+    // Only 2 evaluator calls made (maxIterations)
+    expect(script.evaluate!.length).toBe(3);
+  });
+
+  test("returns no-memories message when DB is empty", async () => {
+    const { service } = makeService({ query: "shouldn't be called" });
+    const answer = await service.query("anything?", "empty", { deep: true });
+    expect(answer).toContain("No memories");
+  });
+});
+
 describe("MemoryService.consolidate", () => {
   test("skips when fewer than 2 memories", async () => {
     const { service } = makeService({

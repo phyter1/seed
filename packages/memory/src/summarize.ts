@@ -96,6 +96,28 @@ Respond ONLY with valid JSON in this exact format:
 
 No other text. Just the JSON object.`;
 
+export const EVALUATE_SYSTEM_PROMPT = `You are a Retrieval Evaluator. You assess whether the retrieved context is sufficient to answer a question.
+
+You will receive a question and the currently retrieved memories/graph context.
+Decide if the context is sufficient to give a thorough answer, or if more information is needed.
+
+Respond ONLY with valid JSON in this exact format:
+{
+  "sufficient": true/false,
+  "reason": "why the context is or isn't sufficient",
+  "refined_query": "a better search query to find missing information (only if sufficient=false)",
+  "explore_entities": ["entity names to traverse in the knowledge graph (only if sufficient=false)"]
+}
+
+Guidelines:
+- If the context clearly answers the question, set sufficient=true
+- If key details are missing or references are vague, set sufficient=false and provide a refined_query
+- If entities are mentioned but their relationships are unclear, add them to explore_entities
+- Be conservative — don't request more iterations unless genuinely needed
+- Never set both refined_query and explore_entities to empty when sufficient=false
+
+No other text. Just the JSON object.`;
+
 export const QUERY_SYSTEM_PROMPT = `You are a Memory Query Agent. You answer questions based ONLY on the provided memories.
 
 You will receive a question, a set of memories with their IDs, and optionally a knowledge graph

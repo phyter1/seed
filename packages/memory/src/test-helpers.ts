@@ -54,6 +54,16 @@ export interface FakeLLMScript {
   };
   /** Response for query prompts (plain text answer). */
   query?: string;
+  /**
+   * Responses for evaluate prompts (deep query). Consumed in order; when
+   * exhausted, falls back to returning `{"sufficient": true}`.
+   */
+  evaluate?: Array<{
+    sufficient: boolean;
+    reason?: string;
+    refined_query?: string;
+    explore_entities?: string[];
+  }>;
   /** Override: return this exact string for any call. */
   raw?: string;
   /** Track calls for assertions. */
@@ -75,6 +85,10 @@ export function createFakeLLM(script: FakeLLMScript): LLMClient {
       }
       if (system.includes("Memory Query Agent") && script.query !== undefined) {
         return script.query;
+      }
+      if (system.includes("Retrieval Evaluator")) {
+        const next = script.evaluate?.shift();
+        return JSON.stringify(next ?? { sufficient: true });
       }
       return "{}";
     },

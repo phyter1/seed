@@ -79,6 +79,25 @@ describe("memory HTTP API", () => {
     expect(res.status).toBe(400);
   });
 
+  test("GET /query?deep=true routes through deep query pipeline", async () => {
+    const script = {
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+      query: "deep answer",
+      evaluate: [{ sufficient: true }],
+    };
+    const { app } = makeApp(script);
+    await app.request("/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "hello", project: "p" }),
+    });
+    const res = await app.request("/query?q=hi&project=p&deep=true");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.answer).toBe("deep answer");
+    expect(script.evaluate!.length).toBe(0);
+  });
+
   test("GET /memories lists stored memories", async () => {
     const { app } = makeApp({
       ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },

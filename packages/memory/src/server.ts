@@ -23,12 +23,14 @@ export function createMemoryApp(deps: MemoryServerDeps): Hono {
     return c.json({ error: err.message }, 500);
   });
 
-  // GET /query?q=&project=&deep= — deep mode currently ignored (P1).
+  // GET /query?q=&project=&deep=
   app.get("/query", async (c) => {
     const q = (c.req.query("q") ?? "").trim();
     if (!q) return c.json({ error: "missing ?q= parameter" }, 400);
     const project = c.req.query("project") ?? "";
-    const answer = await service.query(q, project);
+    const deepParam = (c.req.query("deep") ?? "").toLowerCase();
+    const deep = deepParam === "true" || deepParam === "1" || deepParam === "yes";
+    const answer = await service.query(q, project, { deep });
     return c.json({ question: q, answer });
   });
 

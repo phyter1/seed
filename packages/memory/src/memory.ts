@@ -5,6 +5,7 @@ import {
   INGEST_SYSTEM_PROMPT,
   CONSOLIDATE_SYSTEM_PROMPT,
   QUERY_SYSTEM_PROMPT,
+  EVALUATE_SYSTEM_PROMPT,
   parseJsonResponse,
 } from "./summarize";
 import { chunkText } from "./chunk";
@@ -166,12 +167,92 @@ export class MemoryService {
 
   // --- Query -----------------------------------------------------------
 
-  async query(question: string, project: string = ""): Promise<string> {
+  async query(
+    question: string,
+    project: string = "",
+    opts: { deep?: boolean; maxIterations?: number } = {}
+  ): Promise<string> {
+    if (opts.deep) return this.deepQuery(question, project, opts.maxIterations ?? 3);
     if (!this.db.hasVec) return this.legacyQuery(question, project);
     const scored = await this.searchMemories(question, project);
     if (scored.length === 0) return this.legacyQuery(question, project);
 
     const context = this.buildContext(scored, project);
+    const prompt = `Memories:\n${context}\n\nQuestion: ${question}`;
+    try {
+      return await this.llm.complete([
+        { role: "system", content: QUERY_SYSTEM_PROMPT },
+        { role: "user", content: prompt },
+      ]);
+    } catch (err) {
+      return `Error querying memories: ${(err as Error).message}`;
+    }
+  }
+
+  /**
+   * Iterative retrieval query. After the initial KNN search, an evaluator
+   * LLM decides whether the context is sufficient. If not, it proposes a
+   * refined_query and/or entities to explore in the knowledge graph. Up to
+   * `maxIterations` refinement rounds before synthesizing a final answer.
+   */
+  async deepQuery(
+    question: string,
+    project: string = "",
+    maxIterations: number = 3
+  ): Promise<string> {
+    const allScored: ScoredMemory[] = [];
+    const seenIds = new Set<number>();
+    const extraEntities: string[] = [];
+
+    const addResults = (results: ScoredMemory[]) => {
+      for (const r of results) {
+        if (!seenIds.has(r.memory.id)) {
+          seenIds.add(r.memory.id);
+          allScored.push(r);
+        }
+      }
+    };
+
+    addResults(await this.searchMemories(question, project));
+
+    for (let i = 0; i < maxIterations; i++) {
+      const context = this.buildContext(allScored, project, extraEntities);
+      if (!context.trim()) break;
+
+      const evalPrompt = `Question: ${question}\n\nRetrieved context:\n${context}`;
+      let evaluation: {
+        sufficient?: boolean;
+        reason?: string;
+        refined_query?: string;
+        explore_entities?: string[];
+      };
+      try {
+        const raw = await this.llm.complete([
+          { role: "system", content: EVALUATE_SYSTEM_PROMPT },
+          { role: "user", content: evalPrompt },
+        ]);
+        evaluation = parseJsonResponse(raw);
+      } catch {
+        // Treat parse failure as sufficient — fall through to synthesis.
+        break;
+      }
+
+      if (evaluation.sufficient ?? true) break;
+
+      if (evaluation.refined_query && evaluation.refined_query.trim()) {
+        addResults(await this.searchMemories(evaluation.refined_query, project, seenIds));
+      }
+      if (Array.isArray(evaluation.explore_entities)) {
+        for (const e of evaluation.explore_entities) {
+          if (e && !extraEntities.includes(e)) extraEntities.push(e);
+        }
+      }
+    }
+
+    const context = this.buildContext(allScored, project, extraEntities);
+    if (!context.trim()) {
+      return "No memories stored yet. POST to /ingest to add one.";
+    }
     const prompt = `Memories:\n${context}\n\nQuestion: ${question}`;
     try {
       return await this.llm.complete([
