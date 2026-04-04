@@ -1,11 +1,12 @@
 # First Machine Setup
 
-Turnkey install for adding a fresh macOS machine to a Seed fleet. No Xcode
-CLI Tools, no `bun install`, no `git clone`, no source code on the target.
+Turnkey install for adding a fresh macOS or Linux machine to a Seed fleet.
+No Xcode CLI Tools, no `bun install`, no `git clone`, no source code on
+the target.
 
 ## Prerequisites
 
-- macOS 12+ (Darwin arm64 or x64)
+- macOS 12+ (Darwin arm64 or x64) **or** Linux x64 with systemd (Ubuntu 24.04+, Debian 12+, etc.)
 - A running Seed control plane — see [install-control-plane.md](./install-control-plane.md)
 - The control plane's URL (e.g. `wss://control.example.com` or `ws://<host>:4310`)
 
@@ -17,15 +18,22 @@ curl -sSL https://raw.githubusercontent.com/phyter1/seed/main/setup/install.sh |
   --machine-id $(hostname -s)
 ```
 
+The same script handles both macOS and Linux — it branches internally on
+`uname -s`.
+
 This script:
 
-1. Detects the architecture (`arm64` or `x64`)
+1. Detects the OS (`darwin` or `linux`) and architecture (`arm64` or `x64`)
 2. Downloads the matching pre-built binaries from the latest GitHub Release
 3. Verifies SHA-256 checksums against the release's `checksums.txt`
 4. Installs `seed-agent` and `seed` to `~/.local/bin/`
 5. Registers the machine with the control plane (`seed fleet join`)
-6. Writes `~/Library/LaunchAgents/com.seed.agent.plist`
-7. Loads the launchd service so the agent starts immediately and on every boot
+6. Writes a user-scoped service file:
+   - macOS: `~/Library/LaunchAgents/com.seed.agent.plist`
+   - Linux: `~/.config/systemd/user/seed-agent.service`
+7. On Linux, enables lingering via `sudo loginctl enable-linger` (one-time,
+   **only** if not already enabled) so the service survives logout
+8. Loads the service so the agent starts immediately and on every boot
 
 ## Options
 
@@ -49,13 +57,24 @@ The agent will pick up the token over its WebSocket connection and save it.
 
 ## Verify
 
-```bash
-# From any host with the CLI + operator token:
-seed fleet status
+From any host with the CLI + operator token:
 
-# On the machine itself:
+```bash
+seed fleet status
+```
+
+**On the machine itself (macOS):**
+
+```bash
 tail -f ~/Library/Logs/seed-agent.log
 launchctl list | grep com.seed.agent
+```
+
+**On the machine itself (Linux):**
+
+```bash
+tail -f ~/.local/state/seed-agent/agent.log
+systemctl --user status seed-agent
 ```
 
 ## Re-running the installer
@@ -70,9 +89,23 @@ To force a clean re-join, delete `~/.config/seed-fleet/agent.json` first.
 
 ## Uninstall
 
+**macOS:**
+
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.seed.agent.plist
 rm ~/Library/LaunchAgents/com.seed.agent.plist
 rm ~/.local/bin/seed-agent ~/.local/bin/seed
 rm -rf ~/.config/seed-fleet
+```
+
+**Linux:**
+
+```bash
+systemctl --user disable --now seed-agent.service
+rm ~/.config/systemd/user/seed-agent.service
+systemctl --user daemon-reload
+rm ~/.local/bin/seed-agent ~/.local/bin/seed
+rm -rf ~/.config/seed-fleet ~/.local/state/seed-agent
+# Optional — disable lingering if no other user services need it:
+# sudo loginctl disable-linger "$USER"
 ```
