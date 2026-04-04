@@ -36,23 +36,41 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Install dependencies
+      - name: Install fleet-control dependencies
         working-directory: packages/fleet/control
         run: bun install
 
-      - name: Build binaries
+      - name: Install memory dependencies
+        working-directory: packages/memory
+        run: bun install
+
+      - name: Build fleet-control binaries
         working-directory: packages/fleet/control
         run: bash scripts/build-binaries.sh
 
+      - name: Build memory binaries
+        working-directory: packages/memory
+        run: bash scripts/build-binaries.sh
+
       - name: Collect artifacts for this family
-        working-directory: packages/fleet/control
         shell: bash
         run: |
           mkdir -p release-assets
           for target in ${{ matrix.targets }}; do
-            cp dist/seed-agent-$target release-assets/
-            cp dist/seed-cli-$target release-assets/
-            cp dist/seed-control-plane-$target release-assets/
+            cp packages/fleet/control/dist/seed-agent-$target release-assets/
+            cp packages/fleet/control/dist/seed-cli-$target release-assets/
+            cp packages/fleet/control/dist/seed-control-plane-$target release-assets/
+            cp packages/memory/dist/seed-memory-$target release-assets/
+            # sqlite-vec native extension — ships alongside seed-memory
+            # because bun-compiled binaries can't load .dylib/.so from
+            # the virtual bunfs. Installer points SEED_VEC_PATH at it.
+            vec_dir="packages/memory/dist/sqlite-vec-$target"
+            if [ -d "$vec_dir" ]; then
+              ext=$(find "$vec_dir" -maxdepth 1 -name "vec0.*" -print -quit)
+              if [ -n "$ext" ]; then
+                cp "$ext" "release-assets/vec0-$target.$(basename "$ext" | sed 's/vec0\.//')"
+              fi
+            fi
           done
           # Per-family checksums file so both jobs can upload without clobbering.
           # shasum ships with macOS; sha256sum with Linux.
@@ -66,7 +84,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: seed-binaries-${{ matrix.family }}
-          path: packages/fleet/control/release-assets/*
+          path: release-assets/*
           retention-days: 7
 
   release:
