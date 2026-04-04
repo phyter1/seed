@@ -3,13 +3,12 @@
 <!--
   launchd LaunchAgent for the Seed fleet control-plane agent daemon.
 
-  This file is a template. `setup/install-agent.sh` replaces the @@...@@
+  This file is a template. `setup/install.sh` replaces the @@...@@
   placeholders with the installing user's paths and writes the result to
   ~/Library/LaunchAgents/com.seed.agent.plist.
 
   Placeholders:
-    @@SEED_REPO@@      — absolute path to the seed repo clone
-    @@BUN_PATH@@       — absolute path to the bun executable
+    @@AGENT_BINARY@@   — absolute path to the seed-agent binary
     @@HOME@@           — the installing user's home directory
     @@AGENT_CONFIG@@   — path to the agent config JSON file
 -->
@@ -20,13 +19,11 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>@@BUN_PATH@@</string>
-    <string>run</string>
-    <string>@@SEED_REPO@@/packages/fleet/control/src/agent.ts</string>
+    <string>@@AGENT_BINARY@@</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>@@SEED_REPO@@</string>
+  <string>@@HOME@@</string>
 
   <key>EnvironmentVariables</key>
   <dict>

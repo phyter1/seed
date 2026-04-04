@@ -7,7 +7,8 @@
     "agent": "bun run src/agent.ts",
     "cli": "bun run src/cli.ts",
     "test": "bun test",
-    "dev": "bun --watch run src/main.ts"
+    "dev": "bun --watch run src/main.ts",
+    "build:binaries": "bash scripts/build-binaries.sh"
   },
   "dependencies": {
     "hono": "^4.7.0"
