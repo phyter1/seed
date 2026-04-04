@@ -1,292 +1,811 @@
 /**
- * Fleet Router — LLM-powered request routing across machines.
+ * Rule-based Fleet Router v1.0 — deterministic routing + MLX thinking lifecycle.
  *
- * The router model sits warm on a router-compatible endpoint as the routing brain.
- * On each request it:
- *   1. Asks the router model to pick the best model/machine
- *   2. Forwards to the selected backend
- *   3. Serves the request on the target (OpenAI-compatible endpoint or Ollama)
- *   4. Re-warms the router model for the next request
+ * Ported from ren-jury's battle-tested rule-router.ts. Sub-millisecond routing
+ * via keyword matching. Manages the MLX server's thinking mode: restarts it with
+ * enable_thinking true/false as needed.
  *
- * Config is loaded from seed.config.json when present, or falls back to
- * the legacy fleet.config.json format.
+ * Fleet manifest is built from seed.config.json (or env vars as fallback).
  *
- * Exposes an OpenAI-compatible /v1/chat/completions endpoint.
  * Start: bun run src/router.ts
  */
 
-import { loadRouterConfig, type RouterModelEntry } from "./config";
+import { spawnSync, spawn } from "node:child_process";
+import { loadRouterConfig, type LoadedRouterConfig } from "./config";
+import type { ModelEntry, ChatMessage, ChatResponse, RoutingResult, JurorResult, JuryResult } from "./types";
+
+// ── Load Config ────────────────────────────────────────────────────────────
+
+const CONFIG: LoadedRouterConfig = loadRouterConfig();
 
 const {
-  routerModel: ROUTER_MODEL,
   routerPort: ROUTER_PORT,
   fleet: FLEET,
-  openAICompatibleHost: OPENAI_COMPATIBLE_HOST,
+  mlxHost: MLX_HOST,
+  mlxPythonPath: MLX_PYTHON_PATH,
+  mlxStarterPath: MLX_STARTER,
+  mlxModel: MLX_MODEL,
+  ollamaMachines: OLLAMA_MACHINES,
+  allMachineNames: ALL_MACHINE_NAMES,
   source: CONFIG_SOURCE,
-} = loadRouterConfig();
+} = CONFIG;
 
-// ── Router System Prompt ────────────────────────────────────────────────────
+// ── MLX Server State ────────────────────────────────────────────────────────
 
-const ROUTER_SYSTEM_PROMPT = `You are a request router for a fleet of AI models. Read the user's request and pick the best model to handle it.
+interface MlxState {
+  thinking: boolean;
+  pid: number | null;
+  restarting: boolean;
+}
 
-Available models:
-${FLEET.map((m) => `- ${m.machine}/${m.model}: ${m.description}`).join("\n")}
+const mlxState: MlxState = {
+  thinking: false,
+  pid: null,
+  restarting: false,
+};
 
-ROUTING PRINCIPLES:
-- Simple/fast tasks → small fast models
-- Code tasks → code-specialized models
-- Deep reasoning → reasoning-specialized models
-- Math/logic → math-specialized models
-- General conversation → general-purpose models
-- Trivial requests (greetings, simple factual) → fastest model that can handle it
-- Prefer speed unless the task genuinely needs a bigger model
+let mlxRestartLock: Promise<void> = Promise.resolve();
 
-Respond with ONLY a JSON object, no markdown, no explanation:
-{"machine": "<machine-name>", "model": "exact-model-id", "reason": "one sentence"}`;
+async function withMlxLock<T>(fn: () => Promise<T>): Promise<T> {
+  const previous = mlxRestartLock;
+  let release!: () => void;
+  mlxRestartLock = new Promise((resolve) => { release = resolve; });
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+function killMlxServers(): void {
+  // Bootout launchd service if present (prevents auto-restart on macOS)
+  const uid = String(process.getuid?.() ?? 501);
+  spawnSync("/bin/launchctl", ["bootout", `gui/${uid}/com.ren-jury.mlx-server`], { encoding: "utf8", timeout: 5000 });
+  // Kill any remaining mlx_lm processes
+  spawnSync("pkill", ["-f", "mlx_lm.server"], { encoding: "utf8", timeout: 5000 });
+  spawnSync("pkill", ["-f", "mlx_lm server"], { encoding: "utf8", timeout: 5000 });
+  console.log("[mlx] killed existing server(s)");
+  mlxState.pid = null;
+}
+
+async function startMlxServer(thinking: boolean): Promise<void> {
+  const args = [
+    MLX_STARTER,
+    "--model", MLX_MODEL,
+    "--port", MLX_HOST.split(":")[1] ?? "8080",
+    thinking ? "--thinking" : "--no-thinking",
+  ];
+
+  console.log(`[mlx] starting server: thinking=${thinking}`);
+  const proc = spawn(MLX_PYTHON_PATH, args, {
+    stdio: "inherit",
+    detached: true,
+  });
+  proc.unref();
+  mlxState.pid = proc.pid ?? null;
+  mlxState.thinking = thinking;
+}
+
+async function waitForMlxReady(timeoutMs = 30000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`http://${MLX_HOST}/v1/models`);
+      if (res.ok) return true;
+    } catch { /* not ready yet */ }
+    await Bun.sleep(500);
+  }
+  return false;
+}
+
+async function ensureMlxThinking(thinking: boolean): Promise<void> {
+  if (mlxState.thinking === thinking && !mlxState.restarting) {
+    try {
+      const res = await fetch(`http://${MLX_HOST}/v1/models`);
+      if (res.ok) return;
+    } catch { /* server dead, restart */ }
+  }
+
+  return withMlxLock(async () => {
+    if (mlxState.thinking === thinking && !mlxState.restarting) {
+      try {
+        const res = await fetch(`http://${MLX_HOST}/v1/models`);
+        if (res.ok) return;
+      } catch { /* proceed with restart */ }
+    }
+
+    mlxState.restarting = true;
+    console.log(`[mlx] cycling: thinking=${mlxState.thinking} -> thinking=${thinking}`);
+
+    killMlxServers();
+    for (let i = 0; i < 10; i++) {
+      await Bun.sleep(1000);
+      try {
+        const res = await fetch(`http://${MLX_HOST}/v1/models`);
+        if (!res.ok) break;
+      } catch {
+        break;
+      }
+    }
+
+    await startMlxServer(thinking);
+    const ready = await waitForMlxReady();
+    mlxState.restarting = false;
+
+    if (!ready) {
+      throw new Error(`MLX server failed to start in thinking=${thinking} mode`);
+    }
+    console.log(`[mlx] ready: thinking=${thinking}`);
+  });
+}
+
+// ── Routing Rules ───────────────────────────────────────────────────────────
+
+const THINKING_PATTERNS = /\b(prove|theorem|step.by.step|chain.of.thought|think.through|work.out|derive|solve.*equation|formal.proof|debug.*complex|analyze.*deeply)\b/i;
+const CODE_PATTERNS = /\b(code|function|debug|refactor|implement|typescript|python|rust|golang|bug|error|fix|compile|test|api|endpoint|class|interface|module)\b/i;
+const MATH_PATTERNS = /\b(math|calculate|equation|formula|prove|theorem|integral|derivative|probability|statistics)\b/i;
+const REASONING_PATTERNS = /\b(reason|analyze|think|explain.why|compare|trade.?off|architecture|design|evaluate|critique|review)\b/i;
+const FAST_PATTERNS = /\b(classify|extract|categorize|label|sentiment|tag|summarize|tldr|brief|summary|hello|hi|hey|quick|fast|simple)\b/i;
+
+function routeRequest(content: string, options: { model?: string; thinking?: boolean } = {}): RoutingResult {
+  // 1. Explicit model request — honor it
+  if (options.model && options.model !== "auto") {
+    const entry = FLEET.find(m => m.model === options.model || m.model.includes(options.model!));
+    if (entry) {
+      const needsThinking = options.thinking ?? entry.thinking ?? false;
+      return { entry, reason: `explicit: ${entry.model}`, needsThinking };
+    }
+  }
+
+  // 2. Explicit thinking override
+  if (options.thinking !== undefined) {
+    const needsThinking = options.thinking;
+    if (needsThinking) {
+      const entry = FLEET.find(m => m.thinking === true) ?? FLEET.find(m => m.tags.includes("deep-reasoning"))!;
+      if (entry) {
+        return { entry, reason: "explicit thinking requested", needsThinking: true };
+      }
+    }
+  }
+
+  // 3. Keyword matching — route to the best-fit provider
+  const mlxEntry = FLEET.find(m => m.provider === "openai_compatible");
+  const codeEntry = FLEET.find(m => m.tags.includes("code")) ?? mlxEntry;
+  const fallback = mlxEntry ?? FLEET[0];
+
+  if (MATH_PATTERNS.test(content) || THINKING_PATTERNS.test(content)) {
+    return { entry: fallback, reason: "math/reasoning", needsThinking: false };
+  }
+
+  if (CODE_PATTERNS.test(content)) {
+    return { entry: codeEntry ?? fallback, reason: "code task", needsThinking: false };
+  }
+
+  if (REASONING_PATTERNS.test(content)) {
+    return { entry: fallback, reason: "reasoning", needsThinking: false };
+  }
+
+  if (FAST_PATTERNS.test(content)) {
+    return { entry: fallback, reason: "fast/simple task", needsThinking: false };
+  }
+
+  // 4. Default — fast general-purpose
+  return { entry: fallback, reason: "default (general, fast)", needsThinking: false };
+}
 
 // ── Backend Clients ─────────────────────────────────────────────────────────
 
-interface ChatMessage {
-  role: string;
-  content: string;
-}
-
-interface ChatResponse {
-  content: string;
-  model: string;
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
-}
-
-async function callOpenAICompatible(
-  host: string,
-  model: string,
-  messages: ChatMessage[],
-  options: { temperature?: number; maxTokens?: number } = {}
-): Promise<ChatResponse> {
+async function callOpenAICompatible(host: string, model: string, messages: ChatMessage[], options: { temperature?: number; maxTokens?: number } = {}): Promise<ChatResponse> {
   const res = await fetch(`http://${host}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature: options.temperature ?? 0.7,
-      max_tokens: options.maxTokens ?? 2048,
-    }),
+    body: JSON.stringify({ model, messages, temperature: options.temperature ?? 0.7, max_tokens: options.maxTokens ?? 2048 }),
   });
-  if (!res.ok) throw new Error(`OpenAI-compatible endpoint ${host} error: ${res.status} ${await res.text()}`);
+  if (!res.ok) throw new Error(`OpenAI-compatible ${host} error: ${res.status} ${await res.text()}`);
   const data = await res.json();
+  const msg = data.choices?.[0]?.message ?? {};
   return {
-    content: data.choices?.[0]?.message?.content ?? "",
+    content: msg.content ?? "",
+    reasoning: msg.reasoning,
     model: data.model ?? model,
     usage: data.usage,
   };
 }
 
-async function callOllama(
-  host: string,
-  model: string,
-  messages: ChatMessage[],
-  options: { temperature?: number; maxTokens?: number } = {}
-): Promise<ChatResponse> {
+async function callOllama(host: string, model: string, messages: ChatMessage[], options: { temperature?: number; maxTokens?: number } = {}): Promise<ChatResponse> {
   const res = await fetch(`http://${host}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model,
-      messages,
-      stream: false,
-      options: {
-        temperature: options.temperature ?? 0.7,
-        num_predict: options.maxTokens ?? 2048,
-      },
-    }),
+    body: JSON.stringify({ model, messages, stream: false, options: { temperature: options.temperature ?? 0.7, num_predict: options.maxTokens ?? 2048 } }),
   });
   if (!res.ok) throw new Error(`Ollama ${host} error: ${res.status} ${await res.text()}`);
   const data = await res.json();
   return {
     content: data.message?.content ?? "",
     model: data.model ?? model,
-    usage: {
-      prompt_tokens: data.prompt_eval_count ?? 0,
-      completion_tokens: data.eval_count ?? 0,
-      total_tokens: (data.prompt_eval_count ?? 0) + (data.eval_count ?? 0),
-    },
+    usage: { prompt_tokens: data.prompt_eval_count ?? 0, completion_tokens: data.eval_count ?? 0, total_tokens: (data.prompt_eval_count ?? 0) + (data.eval_count ?? 0) },
   };
 }
 
-// ── Routing Logic ───────────────────────────────────────────────────────────
+// ── Streaming ──────────────────────────────────────────────────────────────
 
-interface RoutingDecision {
-  machine: string;
-  model: string;
-  reason: string;
-}
+async function streamOpenAICompatible(
+  host: string, model: string, messages: ChatMessage[],
+  writer: WritableStreamDefaultWriter<Uint8Array>,
+  options: { temperature?: number; maxTokens?: number } = {},
+): Promise<void> {
+  const encoder = new TextEncoder();
+  const res = await fetch(`http://${host}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model, messages, temperature: options.temperature ?? 0.7, max_tokens: options.maxTokens ?? 2048, stream: true }),
+  });
+  if (!res.ok) throw new Error(`OpenAI-compatible ${host} error: ${res.status} ${await res.text()}`);
 
-function parseRoutingDecision(raw: string): RoutingDecision | null {
-  const cleaned = raw
-    .replace(/<think>[\s\S]*?<\/think>/g, "")
-    .replace(/```json?\n?/g, "")
-    .replace(/```/g, "")
-    .replace(/<\|im_end\|>/g, "")
-    .replace(/<\|endoftext\|>/g, "")
-    .trim();
-  try {
-    const parsed = JSON.parse(cleaned);
-    if (parsed.machine && parsed.model) return parsed;
-  } catch {
-    const match = cleaned.match(/\{[^}]+\}/);
-    if (match) {
-      try {
-        const parsed = JSON.parse(match[0]);
-        if (parsed.machine && parsed.model) return parsed;
-      } catch {}
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+
+    while (buf.includes("\n\n")) {
+      const idx = buf.indexOf("\n\n");
+      const block = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+
+      for (const line of block.split("\n")) {
+        if (!line.startsWith("data: ")) continue;
+        const payload = line.slice(6);
+        if (payload === "[DONE]") {
+          await writer.write(encoder.encode("data: [DONE]\n\n"));
+          continue;
+        }
+        await writer.write(encoder.encode(`data: ${payload}\n\n`));
+      }
     }
   }
-  return null;
+  await writer.close();
 }
 
-function resolveModel(decision: RoutingDecision): RouterModelEntry | null {
-  // Exact match first
-  let entry = FLEET.find((m) => m.model === decision.model && m.machine === decision.machine);
-  if (entry) return entry;
+async function streamOllama(
+  host: string, model: string, messages: ChatMessage[],
+  writer: WritableStreamDefaultWriter<Uint8Array>,
+  options: { temperature?: number; maxTokens?: number } = {},
+): Promise<void> {
+  const encoder = new TextEncoder();
+  const id = `chatcmpl-${Date.now()}`;
+  const created = Math.floor(Date.now() / 1000);
 
-  // Fuzzy: match by model name substring on the right machine
-  entry = FLEET.find(
-    (m) => m.machine === decision.machine && m.model.toLowerCase().includes(decision.model.toLowerCase())
+  const res = await fetch(`http://${host}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model, messages, stream: true, options: { temperature: options.temperature ?? 0.7, num_predict: options.maxTokens ?? 2048 } }),
+  });
+  if (!res.ok) throw new Error(`Ollama ${host} error: ${res.status} ${await res.text()}`);
+
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+
+    while (buf.includes("\n")) {
+      const idx = buf.indexOf("\n");
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (!line) continue;
+
+      try {
+        const chunk = JSON.parse(line);
+        const delta: string = chunk.message?.content ?? "";
+        const isDone = chunk.done === true;
+        if (!isDone && delta === "") continue;
+
+        const sseChunk = {
+          id,
+          object: "chat.completion.chunk",
+          created,
+          model,
+          choices: [{
+            index: 0,
+            delta: isDone ? {} : { content: delta },
+            finish_reason: isDone ? "stop" : null,
+          }],
+        };
+        await writer.write(encoder.encode(`data: ${JSON.stringify(sseChunk)}\n\n`));
+
+        if (isDone) {
+          await writer.write(encoder.encode("data: [DONE]\n\n"));
+        }
+      } catch { /* skip malformed lines */ }
+    }
+  }
+  await writer.close();
+}
+
+// ── Machine Queues (one inference at a time per machine) ────────────────────
+
+interface MachineQueue {
+  promise: Promise<void>;
+  depth: number;
+}
+
+const machineQueues: Record<string, MachineQueue> = {};
+
+// Initialize queues for all known machines
+for (const name of ALL_MACHINE_NAMES) {
+  machineQueues[name] = { promise: Promise.resolve(), depth: 0 };
+}
+
+function ensureQueue(machine: string): MachineQueue {
+  if (!machineQueues[machine]) {
+    machineQueues[machine] = { promise: Promise.resolve(), depth: 0 };
+  }
+  return machineQueues[machine];
+}
+
+function withMachineQueue<T>(machine: string, fn: () => Promise<T>): Promise<T> {
+  const q = ensureQueue(machine);
+  let release!: () => void;
+  const next = new Promise<void>(resolve => { release = resolve; });
+  const previous = q.promise;
+  q.promise = next;
+  q.depth++;
+  return previous.then(fn).finally(() => { q.depth--; release(); });
+}
+
+function pickIdlestMachine(candidates: string[]): string {
+  let best = candidates[0];
+  let bestDepth = ensureQueue(best).depth;
+  for (const m of candidates) {
+    const depth = ensureQueue(m).depth;
+    if (depth < bestDepth) {
+      best = m;
+      bestDepth = depth;
+    }
+  }
+  ensureQueue(best).depth++;
+  return best;
+}
+
+function withPrePickedQueue<T>(machine: string, fn: () => Promise<T>): Promise<T> {
+  const q = ensureQueue(machine);
+  let release!: () => void;
+  const next = new Promise<void>(resolve => { release = resolve; });
+  const previous = q.promise;
+  q.promise = next;
+  return previous.then(fn).finally(() => { q.depth--; release(); });
+}
+
+// ── Jury Mode ──────────────────────────────────────────────────────────────
+
+const JURY_MODELS = FLEET.filter(m => m.provider === "ollama");
+const JURY_TEMPERATURES = [0.3, 0.5, 0.7, 0.9];
+
+function calculateAgreement(responses: string[]): number {
+  if (responses.length <= 1) return 1;
+  const wordSets = responses.map(r => new Set(r.toLowerCase().split(/\s+/).filter(w => w.length > 3)));
+  let totalOverlap = 0;
+  let pairs = 0;
+  for (let i = 0; i < wordSets.length; i++) {
+    for (let j = i + 1; j < wordSets.length; j++) {
+      const intersection = new Set([...wordSets[i]].filter(w => wordSets[j].has(w)));
+      const union = new Set([...wordSets[i], ...wordSets[j]]);
+      totalOverlap += union.size > 0 ? intersection.size / union.size : 0;
+      pairs++;
+    }
+  }
+  return pairs > 0 ? Math.round((totalOverlap / pairs) * 100) / 100 : 1;
+}
+
+async function aggregateJury(question: string, jurorResults: JurorResult[], maxTokens: number): Promise<string> {
+  const valid = jurorResults.filter(r => !r.error && r.content.length > 0);
+  if (valid.length === 0) throw new Error("All jurors failed");
+  if (valid.length === 1) return valid[0].content;
+
+  const responsesText = valid
+    .map((r, i) => `[Juror ${i + 1} (${r.model}@${r.machine})]:\n${r.content}`)
+    .join("\n\n");
+
+  const aggregationPrompt = `You are synthesizing ${valid.length} model responses into one best answer. Be concise and direct.
+
+Question: ${question}
+
+Responses:
+${responsesText}
+
+Synthesize into a single best response. Take the strongest elements from each. Do not mention the jurors or the synthesis process.`;
+
+  const aggregated = await callOpenAICompatible(MLX_HOST, MLX_MODEL, [{ role: "user", content: aggregationPrompt }], { temperature: 0.3, maxTokens });
+  return aggregated.content;
+}
+
+async function runJury(messages: ChatMessage[], options: { maxTokens?: number } = {}): Promise<JuryResult> {
+  const start = Date.now();
+  const maxTokens = options.maxTokens ?? 512;
+  const lastUserMsg = messages[messages.length - 1].content;
+
+  // Build distributed tasks: each model on each machine
+  const ollamaMachineNames = OLLAMA_MACHINES.map(m => m.name);
+  const uniqueModels = [...new Set(JURY_MODELS.map(m => m.model))];
+  const tasks: { entry: ModelEntry; temperature: number }[] = [];
+  let tempIdx = 0;
+  for (const machineName of ollamaMachineNames) {
+    for (const model of uniqueModels) {
+      const entry = JURY_MODELS.find(m => m.machine === machineName && m.model === model);
+      if (entry) {
+        tasks.push({ entry, temperature: JURY_TEMPERATURES[tempIdx % JURY_TEMPERATURES.length] });
+        tempIdx++;
+      }
+    }
+  }
+
+  const results = await Promise.all(
+    tasks.map(({ entry, temperature }) =>
+      withMachineQueue(entry.machine, async () => {
+        const taskStart = Date.now();
+        try {
+          const res = await callOllama(entry.host, entry.model, messages, { temperature, maxTokens });
+          const wallS = (Date.now() - taskStart) / 1000;
+          const tokS = res.usage && res.usage.completion_tokens > 0 && wallS > 0
+            ? Math.round(res.usage.completion_tokens / wallS * 10) / 10 : 0;
+          return { machine: entry.machine, model: entry.model, content: res.content, tokS, wallS: Math.round(wallS * 10) / 10, error: null };
+        } catch (err) {
+          return { machine: entry.machine, model: entry.model, content: "", tokS: 0, wallS: Math.round((Date.now() - taskStart) / 100) / 10, error: String(err) };
+        }
+      })
+    )
   );
-  if (entry) return entry;
 
-  // Fuzzy: match by model name anywhere
-  entry = FLEET.find((m) => m.model.toLowerCase().includes(decision.model.toLowerCase()));
-  if (entry) return entry;
+  const valid = results.filter(r => !r.error && r.content.length > 0);
+  const consensus = await aggregateJury(lastUserMsg, results, maxTokens);
+  const agreement = calculateAgreement(valid.map(r => r.content));
 
-  return null;
+  return { consensus, jurors: results, agreement, totalMs: Date.now() - start };
 }
 
-const DEFAULT_MODEL = FLEET.find((m) => m.tags.includes("general") && m.tags.includes("fast")) ?? FLEET[0];
+// ── Streaming Jury ──────────────────────────────────────────────────────────
 
-async function route(messages: ChatMessage[]): Promise<RoutingDecision & { resolved: RouterModelEntry }> {
-  const routerResponse = await callOpenAICompatible(OPENAI_COMPATIBLE_HOST, ROUTER_MODEL, [
-    { role: "system", content: ROUTER_SYSTEM_PROMPT },
-    { role: "user", content: messages[messages.length - 1].content },
-  ], { temperature: 0.1, maxTokens: 100 });
-
-  const decision = parseRoutingDecision(routerResponse.content);
-
-  if (!decision) {
-    console.log(`[router] failed to parse decision, falling back to default`);
-    console.log(`[router] raw: ${routerResponse.content.slice(0, 200)}`);
-    return { machine: DEFAULT_MODEL.machine, model: DEFAULT_MODEL.model, reason: "routing parse failure — fallback", resolved: DEFAULT_MODEL };
-  }
-
-  const resolved = resolveModel(decision);
-  if (!resolved) {
-    console.log(`[router] unknown model "${decision.model}" on "${decision.machine}", falling back`);
-    return { ...decision, resolved: DEFAULT_MODEL };
-  }
-
-  return { ...decision, resolved };
+function sseEvent(event: string, data: unknown): string {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-// ── Re-warm Router Model ──────────────────────────────────────────────────
+async function runJuryStreaming(messages: ChatMessage[], writer: WritableStreamDefaultWriter<Uint8Array>, options: { maxTokens?: number } = {}): Promise<void> {
+  const encoder = new TextEncoder();
+  const write = (event: string, data: unknown) => writer.write(encoder.encode(sseEvent(event, data)));
+  const start = Date.now();
+  const maxTokens = options.maxTokens ?? 512;
+  const lastUserMsg = messages[messages.length - 1].content;
 
-async function rewarmRouter(): Promise<void> {
-  try {
-    await callOpenAICompatible(OPENAI_COMPATIBLE_HOST, ROUTER_MODEL, [{ role: "user", content: "ready" }], { maxTokens: 1 });
-  } catch {
-    // Non-critical — it'll load on next request anyway
+  const ollamaMachineNames = OLLAMA_MACHINES.map(m => m.name);
+  const uniqueModels = [...new Set(JURY_MODELS.map(m => m.model))];
+  const tasks: { entry: ModelEntry; temperature: number }[] = [];
+  let tempIdx = 0;
+  for (const machineName of ollamaMachineNames) {
+    for (const model of uniqueModels) {
+      const entry = JURY_MODELS.find(m => m.machine === machineName && m.model === model);
+      if (entry) {
+        tasks.push({ entry, temperature: JURY_TEMPERATURES[tempIdx % JURY_TEMPERATURES.length] });
+        tempIdx++;
+      }
+    }
   }
+
+  await write("jury.start", { tasks: tasks.length, machines: ollamaMachineNames.length, aggregator: MLX_MODEL, timestamp: new Date().toISOString() });
+
+  const jurorResults: JurorResult[] = [];
+  let completed = 0;
+
+  const promises = tasks.map(async ({ entry, temperature }) => {
+    const result = await withMachineQueue(entry.machine, async () => {
+      const taskStart = Date.now();
+      try {
+        const res = await callOllama(entry.host, entry.model, messages, { temperature, maxTokens });
+        const wallS = (Date.now() - taskStart) / 1000;
+        const tokS = res.usage && res.usage.completion_tokens > 0 && wallS > 0
+          ? Math.round(res.usage.completion_tokens / wallS * 10) / 10 : 0;
+        return { machine: entry.machine, model: entry.model, content: res.content, tokS, wallS: Math.round(wallS * 10) / 10, error: null };
+      } catch (err) {
+        return { machine: entry.machine, model: entry.model, content: "", tokS: 0, wallS: Math.round((Date.now() - taskStart) / 100) / 10, error: String(err) };
+      }
+    });
+    jurorResults.push(result);
+    completed++;
+    await write("juror.done", {
+      machine: result.machine,
+      model: result.model,
+      answer: result.content.slice(0, 300),
+      tokS: result.tokS,
+      wallS: result.wallS,
+      error: result.error,
+      index: completed,
+      total: tasks.length,
+    });
+    return result;
+  });
+
+  await Promise.all(promises);
+
+  const valid = jurorResults.filter(r => !r.error && r.content.length > 0);
+  await write("jury.deliberation_complete", {
+    responded: valid.length,
+    total: tasks.length,
+    elapsed_ms: Date.now() - start,
+  });
+
+  if (valid.length === 0) {
+    await write("jury.error", { error: "All jurors failed" });
+    await write("done", {});
+    await writer.close();
+    return;
+  }
+
+  await write("aggregation.start", { aggregator: MLX_MODEL, input_count: valid.length });
+
+  const consensus = await aggregateJury(lastUserMsg, jurorResults, maxTokens);
+  const agreement = calculateAgreement(valid.map(r => r.content));
+
+  await write("aggregation.done", { consensus, agreement, total_ms: Date.now() - start });
+  await write("done", { consensus, jurors_responded: valid.length, agreement, total_ms: Date.now() - start });
+  await writer.close();
+}
+
+// ── Sampler Presets ─────────────────────────────────────────────────────────
+
+function getSamplerSettings(thinking: boolean, taskType: string): { temperature: number; maxTokens: number } {
+  if (thinking) {
+    return { temperature: 0.6, maxTokens: 8192 };
+  }
+  if (taskType.includes("code")) {
+    return { temperature: 0.3, maxTokens: 4096 };
+  }
+  if (taskType.includes("classification") || taskType.includes("fast")) {
+    return { temperature: 0.3, maxTokens: 256 };
+  }
+  return { temperature: 0.7, maxTokens: 2048 };
 }
 
 // ── HTTP Server ─────────────────────────────────────────────────────────────
 
 const server = Bun.serve({
   port: ROUTER_PORT,
+  idleTimeout: 120,
 
   async fetch(req) {
     const url = new URL(req.url);
 
     // Health check
     if (url.pathname === "/health") {
-      return Response.json({ status: "ok", router: ROUTER_MODEL, fleet: FLEET.length });
+      return Response.json({
+        status: "ok",
+        router: "rule-based-v1.0",
+        fleet: FLEET.length,
+        mlx: { model: MLX_MODEL, thinking: mlxState.thinking, restarting: mlxState.restarting },
+        config_source: CONFIG_SOURCE,
+      });
+    }
+
+    // MLX state
+    if (url.pathname === "/mlx/state" && req.method === "GET") {
+      return Response.json(mlxState);
+    }
+
+    // Manual MLX thinking toggle
+    if (url.pathname === "/mlx/thinking" && req.method === "POST") {
+      const body = await req.json();
+      const thinking = Boolean(body.thinking);
+      try {
+        await ensureMlxThinking(thinking);
+        return Response.json({ ok: true, thinking: mlxState.thinking });
+      } catch (err) {
+        return Response.json({ ok: false, error: String(err) }, { status: 500 });
+      }
     }
 
     // List fleet
     if (url.pathname === "/v1/models" && req.method === "GET") {
       return Response.json({
         object: "list",
-        data: FLEET.map((m) => ({
+        data: FLEET.map(m => ({
           id: `${m.machine}/${m.model}`,
           object: "model",
           owned_by: m.machine,
           tags: m.tags,
+          thinking: m.thinking,
         })),
       });
     }
 
-    // Main endpoint
-    if (url.pathname === "/v1/chat/completions" && req.method === "POST") {
+    // Jury endpoint
+    if (url.pathname === "/v1/jury" && req.method === "POST") {
       const body = await req.json();
       const messages: ChatMessage[] = body.messages ?? [];
-      const temperature = body.temperature;
-      const maxTokens = body.max_tokens;
+      const maxTokens = body.max_tokens ?? 512;
+      const stream = body.stream ?? false;
 
       if (messages.length === 0) {
         return Response.json({ error: "messages required" }, { status: 400 });
       }
 
-      const start = Date.now();
+      const lastMessage = messages[messages.length - 1].content;
+      console.log(`[jury] "${lastMessage.slice(0, 60)}..." -> ${JURY_MODELS.length} jurors + aggregator (stream=${stream})`);
 
-      // Step 1: Route
-      console.log(`[router] incoming: "${messages[messages.length - 1].content.slice(0, 80)}..."`);
-      const decision = await route(messages);
-      const routeMs = Date.now() - start;
-      console.log(`[router] → ${decision.resolved.machine}/${decision.resolved.model} (${decision.reason}) [${routeMs}ms]`);
+      if (stream) {
+        const { readable, writable } = new TransformStream<Uint8Array>();
+        const writer = writable.getWriter();
 
-      // Step 2: Forward to target
-      let response: ChatResponse;
+        runJuryStreaming(messages, writer, { maxTokens }).catch(async (err) => {
+          const encoder = new TextEncoder();
+          await writer.write(encoder.encode(sseEvent("error", { error: String(err) })));
+          await writer.close();
+        });
+
+        return new Response(readable, {
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+          },
+        });
+      }
+
       try {
-        if (decision.resolved.provider === "openai_compatible") {
-          response = await callOpenAICompatible(decision.resolved.host, decision.resolved.model, messages, { temperature, maxTokens });
+        const result = await runJury(messages, { maxTokens });
+        console.log(`[jury] done [${result.totalMs}ms, agreement=${result.agreement}]`);
+
+        return Response.json({
+          id: `jury-${Date.now()}`,
+          object: "chat.completion",
+          created: Math.floor(Date.now() / 1000),
+          model: "jury",
+          choices: [{
+            index: 0,
+            message: { role: "assistant", content: result.consensus },
+            finish_reason: "stop",
+          }],
+          _jury: {
+            jurors: result.jurors,
+            agreement: result.agreement,
+            aggregator: MLX_MODEL,
+            total_ms: result.totalMs,
+          },
+        });
+      } catch (err) {
+        console.log(`[jury] failed: ${err}`);
+        return Response.json({ error: String(err) }, { status: 502 });
+      }
+    }
+
+    // Main chat completions endpoint
+    if (url.pathname === "/v1/chat/completions" && req.method === "POST") {
+      const body = await req.json();
+      const messages: ChatMessage[] = body.messages ?? [];
+      const requestedModel = body.model;
+      const requestedThinking: boolean | undefined = body.thinking;
+
+      // Redirect to jury if mode=jury
+      if (body.mode === "jury") {
+        const lastMessage = messages[messages.length - 1]?.content ?? "";
+        console.log(`[jury] "${lastMessage.slice(0, 60)}..." (via mode=jury)`);
+        try {
+          const result = await runJury(messages, { maxTokens: body.max_tokens ?? 256 });
+          console.log(`[jury] done [${result.totalMs}ms, agreement=${result.agreement}]`);
+          return Response.json({
+            id: `jury-${Date.now()}`,
+            object: "chat.completion",
+            created: Math.floor(Date.now() / 1000),
+            model: "jury",
+            choices: [{ index: 0, message: { role: "assistant", content: result.consensus }, finish_reason: "stop" }],
+            _jury: { jurors: result.jurors, agreement: result.agreement, aggregator: MLX_MODEL, total_ms: result.totalMs },
+          });
+        } catch (err) {
+          return Response.json({ error: String(err) }, { status: 502 });
+        }
+      }
+
+      if (messages.length === 0) {
+        return Response.json({ error: "messages required" }, { status: 400 });
+      }
+
+      const stream = body.stream !== false;
+      const start = Date.now();
+      const lastMessage = messages[messages.length - 1].content;
+      const { entry, reason, needsThinking } = routeRequest(lastMessage, { model: requestedModel, thinking: requestedThinking });
+
+      const samplerOverrides = getSamplerSettings(needsThinking, reason);
+      const temperature = body.temperature ?? samplerOverrides.temperature;
+      const maxTokens = body.max_tokens ?? samplerOverrides.maxTokens;
+
+      if (stream) {
+        const { readable, writable } = new TransformStream<Uint8Array>();
+        const writer = writable.getWriter();
+
+        (async () => {
+          try {
+            if (entry.provider === "openai_compatible") {
+              const mlxMachine = entry.machine;
+              await withMachineQueue(mlxMachine, async () => {
+                await ensureMlxThinking(needsThinking);
+                console.log(`[router] "${lastMessage.slice(0, 60)}..." -> ${mlxMachine}/${entry.model} (${reason}, stream)`);
+                return streamOpenAICompatible(entry.host, entry.model, messages, writer, { temperature, maxTokens });
+              });
+            } else {
+              const candidates = FLEET.filter(m => m.model === entry.model && m.provider === "ollama");
+              const machineNames = [...new Set(candidates.map(c => c.machine))];
+              const target = pickIdlestMachine(machineNames);
+              const targetEntry = candidates.find(c => c.machine === target)!;
+              console.log(`[router] "${lastMessage.slice(0, 60)}..." -> ${target}/${entry.model} (${reason}, stream, q=${ensureQueue(target).depth})`);
+              await withPrePickedQueue(target, () =>
+                streamOllama(targetEntry.host, targetEntry.model, messages, writer, { temperature, maxTokens })
+              );
+            }
+          } catch (err) {
+            console.log(`[router] stream error: ${err}`);
+            const encoder = new TextEncoder();
+            try {
+              await writer.write(encoder.encode(`data: ${JSON.stringify({ error: String(err) })}\n\n`));
+              await writer.close();
+            } catch { /* writer may already be closed */ }
+          }
+          console.log(`[router] stream done [${Date.now() - start}ms]`);
+        })();
+
+        return new Response(readable, {
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+          },
+        });
+      }
+
+      // Non-streaming
+      let response: ChatResponse;
+      let dispatchedMachine: string = entry.machine;
+      try {
+        if (entry.provider === "openai_compatible") {
+          const mlxMachine = entry.machine;
+          dispatchedMachine = mlxMachine;
+          response = await withMachineQueue(mlxMachine, async () => {
+            await ensureMlxThinking(needsThinking);
+            return callOpenAICompatible(entry.host, entry.model, messages, { temperature, maxTokens });
+          });
+          console.log(`[router] "${lastMessage.slice(0, 60)}..." -> ${mlxMachine}/${entry.model} (${reason}) [${Date.now() - start}ms]`);
         } else {
-          response = await callOllama(decision.resolved.host, decision.resolved.model, messages, { temperature, maxTokens });
+          const candidates = FLEET.filter(m => m.model === entry.model && m.provider === "ollama");
+          const machineNames = [...new Set(candidates.map(c => c.machine))];
+          const target = pickIdlestMachine(machineNames);
+          dispatchedMachine = target;
+          const targetEntry = candidates.find(c => c.machine === target)!;
+          console.log(`[router] "${lastMessage.slice(0, 60)}..." -> ${target}/${entry.model} (${reason}, q=${ensureQueue(target).depth})`);
+          response = await withPrePickedQueue(target, () =>
+            callOllama(targetEntry.host, targetEntry.model, messages, { temperature, maxTokens })
+          );
         }
       } catch (err) {
-        console.log(`[router] target failed: ${err}, falling back to default`);
-        if (DEFAULT_MODEL.provider === "openai_compatible") {
-          response = await callOpenAICompatible(DEFAULT_MODEL.host, DEFAULT_MODEL.model, messages, { temperature, maxTokens });
-        } else {
-          response = await callOllama(DEFAULT_MODEL.host, DEFAULT_MODEL.model, messages, { temperature, maxTokens });
-        }
+        console.log(`[router] target failed: ${err}`);
+        return Response.json({ error: String(err) }, { status: 502 });
       }
 
-      const totalMs = Date.now() - start;
-      console.log(`[router] done [${totalMs}ms total, ${routeMs}ms routing]`);
-
-      // Step 3: Re-warm router model (fire and forget)
-      if (decision.resolved.provider === "openai_compatible") {
-        rewarmRouter();
-      }
-
-      // Return OpenAI-compatible response
       return Response.json({
         id: `chatcmpl-${Date.now()}`,
         object: "chat.completion",
         created: Math.floor(Date.now() / 1000),
-        model: decision.resolved.model,
+        model: entry.model,
         choices: [{
           index: 0,
           message: { role: "assistant", content: response.content },
           finish_reason: "stop",
         }],
         usage: response.usage,
-        _routing: {
-          decision: decision.reason,
-          machine: decision.resolved.machine,
-          model: decision.resolved.model,
-          route_ms: routeMs,
-          total_ms: totalMs,
-        },
+        _routing: { decision: reason, machine: dispatchedMachine, model: entry.model, total_ms: Date.now() - start },
       });
     }
 
@@ -294,17 +813,47 @@ const server = Bun.serve({
   },
 });
 
+// ── Startup ─────────────────────────────────────────────────────────────────
+
+const ollamaMachineList = OLLAMA_MACHINES.map(m => m.name).join(", ") || "none";
+
 console.log(`
-╔══════════════════════════════════════════════╗
-║         Fleet Router v0.2                    ║
-║         http://localhost:${ROUTER_PORT}                ║
-╠══════════════════════════════════════════════╣
-║  Router: ${ROUTER_MODEL.slice(0, 35).padEnd(35)} ║
-║  Fleet:  ${String(FLEET.length).padEnd(2)} models                           ║
-║  Source: ${CONFIG_SOURCE.padEnd(35)} ║
-╚══════════════════════════════════════════════╝
++==================================================+
+|     Fleet Router v1.0 (rule-based + thinking)     |
+|     http://localhost:${String(ROUTER_PORT).padEnd(27)}|
++--------------------------------------------------+
+|  Routing:  keyword rules (0ms, no GPU)            |
+|  MLX:      ${MLX_MODEL.slice(0, 37).padEnd(37)} |
+|  Thinking: managed (auto-cycle on demand)         |
+|  Fleet:    ${String(FLEET.length).padEnd(2)} models across ${String(ALL_MACHINE_NAMES.length).padEnd(2)} machines         |
+|  Ollama:   ${ollamaMachineList.slice(0, 37).padEnd(37)} |
+|  Config:   ${CONFIG_SOURCE.padEnd(37)} |
++==================================================+
 `);
 
-// Warm up the router model on startup
-console.log("[router] warming up router model...");
-rewarmRouter().then(() => console.log("[router] ready."));
+// Verify MLX is reachable on startup
+(async () => {
+  const ready = await waitForMlxReady(5000);
+  if (ready) {
+    try {
+      const res = await fetch(`http://${MLX_HOST}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: MLX_MODEL,
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 16,
+        }),
+      });
+      const data = await res.json();
+      const hasReasoning = Boolean(data.choices?.[0]?.message?.reasoning);
+      mlxState.thinking = hasReasoning;
+      console.log(`[mlx] detected current mode: thinking=${hasReasoning}`);
+    } catch {
+      console.log("[mlx] probe failed, assuming thinking=false");
+    }
+    console.log("[router] ready.");
+  } else {
+    console.log("[mlx] server not reachable — will start on first request");
+  }
+})();
