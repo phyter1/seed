@@ -13,6 +13,14 @@
 import { spawnSync, spawn } from "node:child_process";
 import { loadRouterConfig, type LoadedRouterConfig } from "./config";
 import type { ModelEntry, ChatMessage, ChatResponse, RoutingResult, JurorResult, JuryResult } from "./types";
+import {
+  createTelemetryEmitter,
+  resolveTelemetryEndpoint,
+  buildInferenceEvent,
+  samplerPresetLabel,
+  type Provider as TelemetryProvider,
+  type RouteType as TelemetryRouteType,
+} from "./telemetry";
 
 // ── Load Config ────────────────────────────────────────────────────────────
 
@@ -29,6 +37,35 @@ const {
   allMachineNames: ALL_MACHINE_NAMES,
   source: CONFIG_SOURCE,
 } = CONFIG;
+
+// ── Telemetry ──────────────────────────────────────────────────────────────
+
+const TELEMETRY_ENDPOINT = resolveTelemetryEndpoint();
+const telemetry = createTelemetryEmitter(TELEMETRY_ENDPOINT);
+
+/** Map the router's ProviderKind to the telemetry Provider label. */
+function telemetryProvider(kind: ModelEntry["provider"]): TelemetryProvider {
+  return kind === "openai_compatible" ? "mlx" : "ollama";
+}
+
+/** Classify the route decision from routeRequest's reason string. */
+function classifyRouteType(explicit: boolean, reason: string): TelemetryRouteType {
+  if (explicit) return "explicit";
+  if (reason === "explicit thinking requested") return "explicit";
+  return "keyword";
+}
+
+/** Extract a short, stable pattern tag from the routing reason. */
+function routePatternFromReason(reason: string): string {
+  if (reason.startsWith("explicit:")) return "explicit_model";
+  if (reason === "explicit thinking requested") return "explicit_thinking";
+  if (reason === "math/reasoning") return "math_reasoning";
+  if (reason === "code task") return "code";
+  if (reason === "reasoning") return "reasoning";
+  if (reason === "fast/simple task") return "fast";
+  if (reason.startsWith("default")) return "default";
+  return reason;
+}
 
 // ── MLX Server State ────────────────────────────────────────────────────────
 
@@ -722,15 +759,23 @@ const server = Bun.serve({
       const samplerOverrides = getSamplerSettings(needsThinking, reason);
       const temperature = body.temperature ?? samplerOverrides.temperature;
       const maxTokens = body.max_tokens ?? samplerOverrides.maxTokens;
+      const samplerPreset = samplerPresetLabel(temperature, maxTokens);
+      const isExplicitModel = Boolean(requestedModel && requestedModel !== "auto");
+      const routeType = classifyRouteType(isExplicitModel, reason);
+      const routePattern = routePatternFromReason(reason);
 
       if (stream) {
         const { readable, writable } = new TransformStream<Uint8Array>();
         const writer = writable.getWriter();
 
         (async () => {
+          let streamMachine: string = entry.machine;
+          let streamStatus: "success" | "error" = "success";
+          let streamErr: unknown = null;
           try {
             if (entry.provider === "openai_compatible") {
               const mlxMachine = entry.machine;
+              streamMachine = mlxMachine;
               await withMachineQueue(mlxMachine, async () => {
                 await ensureMlxThinking(needsThinking);
                 console.log(`[router] "${lastMessage.slice(0, 60)}..." -> ${mlxMachine}/${entry.model} (${reason}, stream)`);
@@ -740,6 +785,7 @@ const server = Bun.serve({
               const candidates = FLEET.filter(m => m.model === entry.model && m.provider === "ollama");
               const machineNames = [...new Set(candidates.map(c => c.machine))];
               const target = pickIdlestMachine(machineNames);
+              streamMachine = target;
               const targetEntry = candidates.find(c => c.machine === target)!;
               console.log(`[router] "${lastMessage.slice(0, 60)}..." -> ${target}/${entry.model} (${reason}, stream, q=${ensureQueue(target).depth})`);
               await withPrePickedQueue(target, () =>
@@ -747,6 +793,8 @@ const server = Bun.serve({
               );
             }
           } catch (err) {
+            streamStatus = "error";
+            streamErr = err;
             console.log(`[router] stream error: ${err}`);
             const encoder = new TextEncoder();
             try {
@@ -754,6 +802,23 @@ const server = Bun.serve({
               await writer.close();
             } catch { /* writer may already be closed */ }
           }
+          telemetry.emit(buildInferenceEvent({
+            model: entry.model,
+            machine: streamMachine,
+            provider: telemetryProvider(entry.provider),
+            route_type: routeType,
+            route_pattern: routePattern,
+            tokens_prompt: 0,
+            tokens_completion: 0,
+            duration_ms: Date.now() - start,
+            status: streamStatus,
+            thinking_mode: needsThinking,
+            sampler_preset: samplerPreset,
+            extra: {
+              stream: true,
+              ...(streamErr ? { error: String(streamErr).slice(0, 500) } : {}),
+            },
+          }));
           console.log(`[router] stream done [${Date.now() - start}ms]`);
         })();
 
@@ -791,8 +856,36 @@ const server = Bun.serve({
         }
       } catch (err) {
         console.log(`[router] target failed: ${err}`);
+        telemetry.emit(buildInferenceEvent({
+          model: entry.model,
+          machine: dispatchedMachine,
+          provider: telemetryProvider(entry.provider),
+          route_type: routeType,
+          route_pattern: routePattern,
+          tokens_prompt: 0,
+          tokens_completion: 0,
+          duration_ms: Date.now() - start,
+          status: "error",
+          thinking_mode: needsThinking,
+          sampler_preset: samplerPreset,
+          extra: { error: String(err).slice(0, 500) },
+        }));
         return Response.json({ error: String(err) }, { status: 502 });
       }
+
+      telemetry.emit(buildInferenceEvent({
+        model: entry.model,
+        machine: dispatchedMachine,
+        provider: telemetryProvider(entry.provider),
+        route_type: routeType,
+        route_pattern: routePattern,
+        tokens_prompt: response.usage?.prompt_tokens ?? 0,
+        tokens_completion: response.usage?.completion_tokens ?? 0,
+        duration_ms: Date.now() - start,
+        status: "success",
+        thinking_mode: needsThinking,
+        sampler_preset: samplerPreset,
+      }));
 
       return Response.json({
         id: `chatcmpl-${Date.now()}`,
