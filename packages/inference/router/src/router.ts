@@ -13,6 +13,14 @@
 import { spawnSync, spawn } from "node:child_process";
 import { loadRouterConfig, type LoadedRouterConfig } from "./config";
 import type { ModelEntry, ChatMessage, ChatResponse, RoutingResult, JurorResult, JuryResult } from "./types";
+import {
+  createTelemetryEmitter,
+  resolveTelemetryEndpoint,
+  buildInferenceEvent,
+  samplerPresetLabel,
+  type Provider as TelemetryProvider,
+  type RouteType as TelemetryRouteType,
+} from "./telemetry";
 
 // ── Load Config ────────────────────────────────────────────────────────────
 
@@ -29,6 +37,35 @@ const {
   allMachineNames: ALL_MACHINE_NAMES,
   source: CONFIG_SOURCE,
 } = CONFIG;
+
+// ── Telemetry ──────────────────────────────────────────────────────────────
+
+const TELEMETRY_ENDPOINT = resolveTelemetryEndpoint();
+const telemetry = createTelemetryEmitter(TELEMETRY_ENDPOINT);
+
+/** Map the router's ProviderKind to the telemetry Provider label. */
+function telemetryProvider(kind: ModelEntry["provider"]): TelemetryProvider {
+  return kind === "openai_compatible" ? "mlx" : "ollama";
+}
+
+/** Classify the route decision from routeRequest's reason string. */
+function classifyRouteType(explicit: boolean, reason: string): TelemetryRouteType {
+  if (explicit) return "explicit";
+  if (reason === "explicit thinking requested") return "explicit";
+  return "keyword";
+}
+
+/** Extract a short, stable pattern tag from the routing reason. */
+function routePatternFromReason(reason: string): string {
+  if (reason.startsWith("explicit:")) return "explicit_model";
+  if (reason === "explicit thinking requested") return "explicit_thinking";
+  if (reason === "math/reasoning") return "math_reasoning";
+  if (reason === "code task") return "code";
+  if (reason === "reasoning") return "reasoning";
+  if (reason === "fast/simple task") return "fast";
+  if (reason.startsWith("default")) return "default";
+  return reason;
+}
 
 // ── MLX Server State ────────────────────────────────────────────────────────
 
@@ -448,7 +485,7 @@ async function runJury(messages: ChatMessage[], options: { maxTokens?: number } 
   }
 
   const results = await Promise.all(
-    tasks.map(({ entry, temperature }) =>
+    tasks.map(({ entry, temperature }, jurorIndex) =>
       withMachineQueue(entry.machine, async () => {
         const taskStart = Date.now();
         try {
@@ -456,8 +493,38 @@ async function runJury(messages: ChatMessage[], options: { maxTokens?: number } 
           const wallS = (Date.now() - taskStart) / 1000;
           const tokS = res.usage && res.usage.completion_tokens > 0 && wallS > 0
             ? Math.round(res.usage.completion_tokens / wallS * 10) / 10 : 0;
+          telemetry.emit(buildInferenceEvent({
+            event_type: "jury_juror",
+            model: entry.model,
+            machine: entry.machine,
+            provider: "ollama",
+            route_type: "jury",
+            route_pattern: "juror",
+            tokens_prompt: res.usage?.prompt_tokens ?? 0,
+            tokens_completion: res.usage?.completion_tokens ?? 0,
+            duration_ms: Date.now() - taskStart,
+            status: "success",
+            thinking_mode: false,
+            sampler_preset: samplerPresetLabel(temperature, maxTokens),
+            extra: { juror_index: jurorIndex, jury_size: tasks.length },
+          }));
           return { machine: entry.machine, model: entry.model, content: res.content, tokS, wallS: Math.round(wallS * 10) / 10, error: null };
         } catch (err) {
+          telemetry.emit(buildInferenceEvent({
+            event_type: "jury_juror",
+            model: entry.model,
+            machine: entry.machine,
+            provider: "ollama",
+            route_type: "jury",
+            route_pattern: "juror",
+            tokens_prompt: 0,
+            tokens_completion: 0,
+            duration_ms: Date.now() - taskStart,
+            status: "error",
+            thinking_mode: false,
+            sampler_preset: samplerPresetLabel(temperature, maxTokens),
+            extra: { juror_index: jurorIndex, jury_size: tasks.length, error: String(err).slice(0, 500) },
+          }));
           return { machine: entry.machine, model: entry.model, content: "", tokS: 0, wallS: Math.round((Date.now() - taskStart) / 100) / 10, error: String(err) };
         }
       })
@@ -465,8 +532,47 @@ async function runJury(messages: ChatMessage[], options: { maxTokens?: number } 
   );
 
   const valid = results.filter(r => !r.error && r.content.length > 0);
-  const consensus = await aggregateJury(lastUserMsg, results, maxTokens);
+  const aggregateStart = Date.now();
+  let consensus: string;
+  let aggregateStatus: "success" | "error" = "success";
+  try {
+    consensus = await aggregateJury(lastUserMsg, results, maxTokens);
+  } catch (err) {
+    aggregateStatus = "error";
+    telemetry.emit(buildInferenceEvent({
+      event_type: "jury_aggregate",
+      model: MLX_MODEL,
+      machine: (FLEET.find(m => m.provider === "openai_compatible")?.machine) ?? "mlx",
+      provider: "mlx",
+      route_type: "jury",
+      route_pattern: "aggregate",
+      tokens_prompt: 0,
+      tokens_completion: 0,
+      duration_ms: Date.now() - aggregateStart,
+      status: "error",
+      thinking_mode: false,
+      sampler_preset: samplerPresetLabel(0.3, maxTokens),
+      extra: { jurors_responded: valid.length, jury_size: tasks.length, total_ms: Date.now() - start, error: String(err).slice(0, 500) },
+    }));
+    throw err;
+  }
   const agreement = calculateAgreement(valid.map(r => r.content));
+
+  telemetry.emit(buildInferenceEvent({
+    event_type: "jury_aggregate",
+    model: MLX_MODEL,
+    machine: (FLEET.find(m => m.provider === "openai_compatible")?.machine) ?? "mlx",
+    provider: "mlx",
+    route_type: "jury",
+    route_pattern: "aggregate",
+    tokens_prompt: 0,
+    tokens_completion: 0,
+    duration_ms: Date.now() - aggregateStart,
+    status: aggregateStatus,
+    thinking_mode: false,
+    sampler_preset: samplerPresetLabel(0.3, maxTokens),
+    extra: { jurors_responded: valid.length, jury_size: tasks.length, agreement, total_ms: Date.now() - start },
+  }));
 
   return { consensus, jurors: results, agreement, totalMs: Date.now() - start };
 }
@@ -503,7 +609,7 @@ async function runJuryStreaming(messages: ChatMessage[], writer: WritableStreamD
   const jurorResults: JurorResult[] = [];
   let completed = 0;
 
-  const promises = tasks.map(async ({ entry, temperature }) => {
+  const promises = tasks.map(async ({ entry, temperature }, jurorIndex) => {
     const result = await withMachineQueue(entry.machine, async () => {
       const taskStart = Date.now();
       try {
@@ -511,8 +617,38 @@ async function runJuryStreaming(messages: ChatMessage[], writer: WritableStreamD
         const wallS = (Date.now() - taskStart) / 1000;
         const tokS = res.usage && res.usage.completion_tokens > 0 && wallS > 0
           ? Math.round(res.usage.completion_tokens / wallS * 10) / 10 : 0;
+        telemetry.emit(buildInferenceEvent({
+          event_type: "jury_juror",
+          model: entry.model,
+          machine: entry.machine,
+          provider: "ollama",
+          route_type: "jury",
+          route_pattern: "juror",
+          tokens_prompt: res.usage?.prompt_tokens ?? 0,
+          tokens_completion: res.usage?.completion_tokens ?? 0,
+          duration_ms: Date.now() - taskStart,
+          status: "success",
+          thinking_mode: false,
+          sampler_preset: samplerPresetLabel(temperature, maxTokens),
+          extra: { juror_index: jurorIndex, jury_size: tasks.length, stream: true },
+        }));
         return { machine: entry.machine, model: entry.model, content: res.content, tokS, wallS: Math.round(wallS * 10) / 10, error: null };
       } catch (err) {
+        telemetry.emit(buildInferenceEvent({
+          event_type: "jury_juror",
+          model: entry.model,
+          machine: entry.machine,
+          provider: "ollama",
+          route_type: "jury",
+          route_pattern: "juror",
+          tokens_prompt: 0,
+          tokens_completion: 0,
+          duration_ms: Date.now() - taskStart,
+          status: "error",
+          thinking_mode: false,
+          sampler_preset: samplerPresetLabel(temperature, maxTokens),
+          extra: { juror_index: jurorIndex, jury_size: tasks.length, stream: true, error: String(err).slice(0, 500) },
+        }));
         return { machine: entry.machine, model: entry.model, content: "", tokS: 0, wallS: Math.round((Date.now() - taskStart) / 100) / 10, error: String(err) };
       }
     });
@@ -540,7 +676,24 @@ async function runJuryStreaming(messages: ChatMessage[], writer: WritableStreamD
     elapsed_ms: Date.now() - start,
   });
 
+  const aggregatorMachine = (FLEET.find(m => m.provider === "openai_compatible")?.machine) ?? "mlx";
+
   if (valid.length === 0) {
+    telemetry.emit(buildInferenceEvent({
+      event_type: "jury_aggregate",
+      model: MLX_MODEL,
+      machine: aggregatorMachine,
+      provider: "mlx",
+      route_type: "jury",
+      route_pattern: "aggregate",
+      tokens_prompt: 0,
+      tokens_completion: 0,
+      duration_ms: 0,
+      status: "error",
+      thinking_mode: false,
+      sampler_preset: samplerPresetLabel(0.3, maxTokens),
+      extra: { jurors_responded: 0, jury_size: tasks.length, stream: true, total_ms: Date.now() - start, error: "all_jurors_failed" },
+    }));
     await write("jury.error", { error: "All jurors failed" });
     await write("done", {});
     await writer.close();
@@ -549,8 +702,45 @@ async function runJuryStreaming(messages: ChatMessage[], writer: WritableStreamD
 
   await write("aggregation.start", { aggregator: MLX_MODEL, input_count: valid.length });
 
-  const consensus = await aggregateJury(lastUserMsg, jurorResults, maxTokens);
+  const aggregateStart = Date.now();
+  let consensus: string;
+  try {
+    consensus = await aggregateJury(lastUserMsg, jurorResults, maxTokens);
+  } catch (err) {
+    telemetry.emit(buildInferenceEvent({
+      event_type: "jury_aggregate",
+      model: MLX_MODEL,
+      machine: aggregatorMachine,
+      provider: "mlx",
+      route_type: "jury",
+      route_pattern: "aggregate",
+      tokens_prompt: 0,
+      tokens_completion: 0,
+      duration_ms: Date.now() - aggregateStart,
+      status: "error",
+      thinking_mode: false,
+      sampler_preset: samplerPresetLabel(0.3, maxTokens),
+      extra: { jurors_responded: valid.length, jury_size: tasks.length, stream: true, total_ms: Date.now() - start, error: String(err).slice(0, 500) },
+    }));
+    throw err;
+  }
   const agreement = calculateAgreement(valid.map(r => r.content));
+
+  telemetry.emit(buildInferenceEvent({
+    event_type: "jury_aggregate",
+    model: MLX_MODEL,
+    machine: aggregatorMachine,
+    provider: "mlx",
+    route_type: "jury",
+    route_pattern: "aggregate",
+    tokens_prompt: 0,
+    tokens_completion: 0,
+    duration_ms: Date.now() - aggregateStart,
+    status: "success",
+    thinking_mode: false,
+    sampler_preset: samplerPresetLabel(0.3, maxTokens),
+    extra: { jurors_responded: valid.length, jury_size: tasks.length, stream: true, agreement, total_ms: Date.now() - start },
+  }));
 
   await write("aggregation.done", { consensus, agreement, total_ms: Date.now() - start });
   await write("done", { consensus, jurors_responded: valid.length, agreement, total_ms: Date.now() - start });
@@ -722,15 +912,23 @@ const server = Bun.serve({
       const samplerOverrides = getSamplerSettings(needsThinking, reason);
       const temperature = body.temperature ?? samplerOverrides.temperature;
       const maxTokens = body.max_tokens ?? samplerOverrides.maxTokens;
+      const samplerPreset = samplerPresetLabel(temperature, maxTokens);
+      const isExplicitModel = Boolean(requestedModel && requestedModel !== "auto");
+      const routeType = classifyRouteType(isExplicitModel, reason);
+      const routePattern = routePatternFromReason(reason);
 
       if (stream) {
         const { readable, writable } = new TransformStream<Uint8Array>();
         const writer = writable.getWriter();
 
         (async () => {
+          let streamMachine: string = entry.machine;
+          let streamStatus: "success" | "error" = "success";
+          let streamErr: unknown = null;
           try {
             if (entry.provider === "openai_compatible") {
               const mlxMachine = entry.machine;
+              streamMachine = mlxMachine;
               await withMachineQueue(mlxMachine, async () => {
                 await ensureMlxThinking(needsThinking);
                 console.log(`[router] "${lastMessage.slice(0, 60)}..." -> ${mlxMachine}/${entry.model} (${reason}, stream)`);
@@ -740,6 +938,7 @@ const server = Bun.serve({
               const candidates = FLEET.filter(m => m.model === entry.model && m.provider === "ollama");
               const machineNames = [...new Set(candidates.map(c => c.machine))];
               const target = pickIdlestMachine(machineNames);
+              streamMachine = target;
               const targetEntry = candidates.find(c => c.machine === target)!;
               console.log(`[router] "${lastMessage.slice(0, 60)}..." -> ${target}/${entry.model} (${reason}, stream, q=${ensureQueue(target).depth})`);
               await withPrePickedQueue(target, () =>
@@ -747,6 +946,8 @@ const server = Bun.serve({
               );
             }
           } catch (err) {
+            streamStatus = "error";
+            streamErr = err;
             console.log(`[router] stream error: ${err}`);
             const encoder = new TextEncoder();
             try {
@@ -754,6 +955,23 @@ const server = Bun.serve({
               await writer.close();
             } catch { /* writer may already be closed */ }
           }
+          telemetry.emit(buildInferenceEvent({
+            model: entry.model,
+            machine: streamMachine,
+            provider: telemetryProvider(entry.provider),
+            route_type: routeType,
+            route_pattern: routePattern,
+            tokens_prompt: 0,
+            tokens_completion: 0,
+            duration_ms: Date.now() - start,
+            status: streamStatus,
+            thinking_mode: needsThinking,
+            sampler_preset: samplerPreset,
+            extra: {
+              stream: true,
+              ...(streamErr ? { error: String(streamErr).slice(0, 500) } : {}),
+            },
+          }));
           console.log(`[router] stream done [${Date.now() - start}ms]`);
         })();
 
@@ -791,8 +1009,36 @@ const server = Bun.serve({
         }
       } catch (err) {
         console.log(`[router] target failed: ${err}`);
+        telemetry.emit(buildInferenceEvent({
+          model: entry.model,
+          machine: dispatchedMachine,
+          provider: telemetryProvider(entry.provider),
+          route_type: routeType,
+          route_pattern: routePattern,
+          tokens_prompt: 0,
+          tokens_completion: 0,
+          duration_ms: Date.now() - start,
+          status: "error",
+          thinking_mode: needsThinking,
+          sampler_preset: samplerPreset,
+          extra: { error: String(err).slice(0, 500) },
+        }));
         return Response.json({ error: String(err) }, { status: 502 });
       }
+
+      telemetry.emit(buildInferenceEvent({
+        model: entry.model,
+        machine: dispatchedMachine,
+        provider: telemetryProvider(entry.provider),
+        route_type: routeType,
+        route_pattern: routePattern,
+        tokens_prompt: response.usage?.prompt_tokens ?? 0,
+        tokens_completion: response.usage?.completion_tokens ?? 0,
+        duration_ms: Date.now() - start,
+        status: "success",
+        thinking_mode: needsThinking,
+        sampler_preset: samplerPreset,
+      }));
 
       return Response.json({
         id: `chatcmpl-${Date.now()}`,

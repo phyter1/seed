@@ -102,5 +102,8 @@
     "strategy": "capability_router",
     "prefer_local": true,
     "default_capability": "any"
+  },
+  "telemetry": {
+    "endpoint": "http://localhost:4000/otlp/v1/logs"
   }
 }
