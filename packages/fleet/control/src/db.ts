@@ -7,6 +7,14 @@ import type {
   ConfigEntry,
   ConfigHistoryEntry,
   HealthReport,
+  AgentSession,
+  ServiceType,
+  SessionStatus,
+  HealthLevel,
+  StoredAgentEvent,
+  EventCategory,
+  NormalizedEvent,
+  MetricWindow,
 } from "./types";
 
 export class ControlDB {
@@ -72,6 +80,75 @@ export class ControlDB {
       CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
       CREATE INDEX IF NOT EXISTS idx_audit_machine ON audit_log(machine_id);
       CREATE INDEX IF NOT EXISTS idx_audit_command ON audit_log(command_id);
+
+      -- --- Telemetry: Agent Sessions ---
+      CREATE TABLE IF NOT EXISTS agent_sessions (
+        id TEXT PRIMARY KEY,
+        service_type TEXT NOT NULL,
+        session_kind TEXT NOT NULL DEFAULT 'cli'
+          CHECK (session_kind IN ('cli', 'inference')),
+        status TEXT NOT NULL DEFAULT 'active'
+          CHECK (status IN ('active', 'idle', 'stuck', 'stopped', 'crashed', 'completed')),
+        health_level TEXT NOT NULL DEFAULT 'green'
+          CHECK (health_level IN ('green', 'yellow', 'red')),
+        machine_id TEXT,
+        current_task TEXT,
+        worktree_path TEXT,
+        total_tokens INTEGER NOT NULL DEFAULT 0 CHECK (total_tokens >= 0),
+        total_cost_cents INTEGER NOT NULL DEFAULT 0 CHECK (total_cost_cents >= 0),
+        context_usage_percent INTEGER NOT NULL DEFAULT 0
+          CHECK (context_usage_percent BETWEEN 0 AND 100),
+        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+        last_event_at TEXT,
+        ended_at TEXT,
+        end_reason TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_sessions_status ON agent_sessions(status);
+      CREATE INDEX IF NOT EXISTS idx_sessions_service_type ON agent_sessions(service_type);
+      CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON agent_sessions(started_at);
+      CREATE INDEX IF NOT EXISTS idx_sessions_machine ON agent_sessions(machine_id);
+
+      -- --- Telemetry: Agent Events ---
+      CREATE TABLE IF NOT EXISTS agent_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL
+          REFERENCES agent_sessions(id) ON DELETE CASCADE ON UPDATE CASCADE,
+        service_type TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        event_name TEXT NOT NULL,
+        detail TEXT,
+        token_count INTEGER,
+        cost_cents INTEGER,
+        source TEXT NOT NULL
+          CHECK (source IN ('otel', 'hook', 'internal')),
+        machine_id TEXT,
+        timestamp TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_events_session ON agent_events(session_id);
+      CREATE INDEX IF NOT EXISTS idx_events_session_ts ON agent_events(session_id, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_events_timestamp ON agent_events(timestamp);
+      CREATE INDEX IF NOT EXISTS idx_events_type ON agent_events(event_type);
+
+      -- --- Telemetry: Agent Metrics (windowed aggregation) ---
+      CREATE TABLE IF NOT EXISTS agent_metrics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL
+          REFERENCES agent_sessions(id) ON DELETE CASCADE ON UPDATE CASCADE,
+        window_start TEXT NOT NULL,
+        window_end TEXT NOT NULL,
+        token_count INTEGER NOT NULL DEFAULT 0,
+        cost_cents INTEGER NOT NULL DEFAULT 0,
+        event_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_metrics_session ON agent_metrics(session_id);
+      CREATE INDEX IF NOT EXISTS idx_metrics_window ON agent_metrics(window_start);
     `);
   }
 
@@ -354,7 +431,450 @@ export class ControlDB {
       .all(...params, limit) as AuditEntry[];
   }
 
+  // --- Telemetry: Sessions ---
+
+  /**
+   * Upsert a session row. If it doesn't exist, creates it. If it does, updates
+   * last_event_at (and any provided fields).
+   */
+  upsertSession(input: {
+    id: string;
+    service_type: ServiceType;
+    session_kind: "cli" | "inference";
+    machine_id?: string | null;
+    started_at?: string;
+    last_event_at?: string;
+  }): AgentSession {
+    const startedAt = input.started_at ?? new Date().toISOString();
+    const lastEventAt = input.last_event_at ?? startedAt;
+
+    this.db
+      .prepare(
+        `INSERT INTO agent_sessions
+           (id, service_type, session_kind, machine_id, started_at, last_event_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           last_event_at = excluded.last_event_at,
+           updated_at = datetime('now')`
+      )
+      .run(
+        input.id,
+        input.service_type,
+        input.session_kind,
+        input.machine_id ?? null,
+        startedAt,
+        lastEventAt
+      );
+
+    return this.getSession(input.id)!;
+  }
+
+  getSession(id: string): AgentSession | null {
+    const row = this.db
+      .prepare("SELECT * FROM agent_sessions WHERE id = ?")
+      .get(id) as any;
+    return row ? this.rowToSession(row) : null;
+  }
+
+  listSessions(opts?: {
+    service_type?: ServiceType;
+    status?: SessionStatus;
+    session_kind?: "cli" | "inference";
+    limit?: number;
+    offset?: number;
+  }): { sessions: AgentSession[]; total: number } {
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    if (opts?.service_type) {
+      conditions.push("service_type = ?");
+      params.push(opts.service_type);
+    }
+    if (opts?.status) {
+      conditions.push("status = ?");
+      params.push(opts.status);
+    }
+    if (opts?.session_kind) {
+      conditions.push("session_kind = ?");
+      params.push(opts.session_kind);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const limit = opts?.limit ?? 50;
+    const offset = opts?.offset ?? 0;
+
+    const countRow = this.db
+      .prepare(`SELECT COUNT(*) as total FROM agent_sessions ${where}`)
+      .get(...params) as any;
+    const total = countRow?.total ?? 0;
+
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM agent_sessions ${where}
+         ORDER BY started_at DESC
+         LIMIT ? OFFSET ?`
+      )
+      .all(...params, limit, offset) as any[];
+
+    return { sessions: rows.map((r) => this.rowToSession(r)), total };
+  }
+
+  updateSessionStatus(
+    id: string,
+    status: SessionStatus,
+    endReason?: string
+  ): AgentSession | null {
+    const ended = status === "stopped" || status === "crashed" || status === "completed";
+    this.db
+      .prepare(
+        `UPDATE agent_sessions
+         SET status = ?,
+             ended_at = CASE WHEN ? = 1 THEN datetime('now') ELSE ended_at END,
+             end_reason = COALESCE(?, end_reason),
+             updated_at = datetime('now')
+         WHERE id = ?`
+      )
+      .run(status, ended ? 1 : 0, endReason ?? null, id);
+    return this.getSession(id);
+  }
+
+  updateSessionHealth(id: string, health: HealthLevel): void {
+    this.db
+      .prepare(
+        "UPDATE agent_sessions SET health_level = ?, updated_at = datetime('now') WHERE id = ?"
+      )
+      .run(health, id);
+  }
+
+  updateSessionCurrentTask(id: string, currentTask: string | null): void {
+    this.db
+      .prepare(
+        "UPDATE agent_sessions SET current_task = ?, updated_at = datetime('now') WHERE id = ?"
+      )
+      .run(currentTask, id);
+  }
+
+  // --- Telemetry: Events ---
+
+  /**
+   * Insert a normalized event. Ensures the session row exists (FK) and
+   * accumulates token/cost totals on the session.
+   */
+  insertEvent(event: NormalizedEvent): number {
+    // Determine session_kind: inference sources use 'inference', CLI agents use 'cli'
+    const sessionKind: "cli" | "inference" =
+      event.service_type === "fleet-router" ||
+      event.service_type === "inference-worker"
+        ? "inference"
+        : "cli";
+
+    // Ensure session exists
+    this.upsertSession({
+      id: event.session_id,
+      service_type: event.service_type,
+      session_kind: sessionKind,
+      machine_id: event.machine_id ?? null,
+      started_at: event.timestamp.toISOString(),
+      last_event_at: event.timestamp.toISOString(),
+    });
+
+    const result = this.db
+      .prepare(
+        `INSERT INTO agent_events
+           (session_id, service_type, event_type, event_name, detail,
+            token_count, cost_cents, source, machine_id, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        event.session_id,
+        event.service_type,
+        event.event_type,
+        event.event_name,
+        JSON.stringify(event.detail),
+        event.token_count > 0 ? event.token_count : null,
+        event.cost_cents > 0 ? event.cost_cents : null,
+        event.source,
+        event.machine_id ?? null,
+        event.timestamp.toISOString()
+      );
+
+    // Accumulate token/cost totals on session
+    if (event.token_count > 0 || event.cost_cents > 0) {
+      this.db
+        .prepare(
+          `UPDATE agent_sessions
+           SET total_tokens = total_tokens + ?,
+               total_cost_cents = total_cost_cents + ?,
+               last_event_at = ?,
+               updated_at = datetime('now')
+           WHERE id = ?`
+        )
+        .run(
+          event.token_count,
+          event.cost_cents,
+          event.timestamp.toISOString(),
+          event.session_id
+        );
+    } else {
+      this.db
+        .prepare(
+          `UPDATE agent_sessions
+           SET last_event_at = ?, updated_at = datetime('now')
+           WHERE id = ?`
+        )
+        .run(event.timestamp.toISOString(), event.session_id);
+    }
+
+    // Replace context_usage_percent if present
+    if (event.context_usage_percent !== undefined) {
+      this.db
+        .prepare(
+          `UPDATE agent_sessions
+           SET context_usage_percent = ?, updated_at = datetime('now')
+           WHERE id = ?`
+        )
+        .run(event.context_usage_percent, event.session_id);
+    }
+
+    return Number(result.lastInsertRowid);
+  }
+
+  getSessionEvents(
+    sessionId: string,
+    opts?: { cursor?: number; event_type?: EventCategory; limit?: number }
+  ): { events: StoredAgentEvent[]; has_more: boolean; next_cursor: number | null } | null {
+    const session = this.getSession(sessionId);
+    if (!session) return null;
+
+    const conditions: string[] = ["session_id = ?"];
+    const params: any[] = [sessionId];
+
+    if (opts?.cursor !== undefined) {
+      conditions.push("id < ?");
+      params.push(opts.cursor);
+    }
+    if (opts?.event_type) {
+      conditions.push("event_type = ?");
+      params.push(opts.event_type);
+    }
+
+    const where = `WHERE ${conditions.join(" AND ")}`;
+    const limit = opts?.limit ?? 50;
+
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM agent_events ${where}
+         ORDER BY id DESC LIMIT ?`
+      )
+      .all(...params, limit + 1) as any[];
+
+    const has_more = rows.length > limit;
+    const sliced = has_more ? rows.slice(0, limit) : rows;
+    const events = sliced.map((r) => this.rowToEvent(r));
+    const next_cursor = has_more && events.length
+      ? events[events.length - 1].id
+      : null;
+
+    return { events, has_more, next_cursor };
+  }
+
+  /**
+   * Insert a metric window. Used by the cost aggregator.
+   */
+  insertMetricWindow(window: Omit<MetricWindow, "id">): number {
+    const result = this.db
+      .prepare(
+        `INSERT INTO agent_metrics
+           (session_id, window_start, window_end, token_count, cost_cents, event_count)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        window.session_id,
+        window.window_start,
+        window.window_end,
+        window.token_count,
+        window.cost_cents,
+        window.event_count
+      );
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Cost summary: today/week/month totals. */
+  getCostSummary(): {
+    today: { tokens: number; cost_cents: number };
+    week: { tokens: number; cost_cents: number };
+    month: { tokens: number; cost_cents: number };
+  } {
+    const row = this.db
+      .prepare(
+        `SELECT
+           CAST(COALESCE(SUM(CASE WHEN window_start >= datetime('now', 'start of day') THEN token_count ELSE 0 END), 0) AS INTEGER) AS today_tokens,
+           CAST(COALESCE(SUM(CASE WHEN window_start >= datetime('now', 'start of day') THEN cost_cents  ELSE 0 END), 0) AS INTEGER) AS today_cost,
+           CAST(COALESCE(SUM(CASE WHEN window_start >= datetime('now', '-7 days') THEN token_count ELSE 0 END), 0) AS INTEGER) AS week_tokens,
+           CAST(COALESCE(SUM(CASE WHEN window_start >= datetime('now', '-7 days') THEN cost_cents  ELSE 0 END), 0) AS INTEGER) AS week_cost,
+           CAST(COALESCE(SUM(CASE WHEN window_start >= datetime('now', '-30 days') THEN token_count ELSE 0 END), 0) AS INTEGER) AS month_tokens,
+           CAST(COALESCE(SUM(CASE WHEN window_start >= datetime('now', '-30 days') THEN cost_cents  ELSE 0 END), 0) AS INTEGER) AS month_cost
+         FROM agent_metrics`
+      )
+      .get() as any;
+
+    return {
+      today: { tokens: row?.today_tokens ?? 0, cost_cents: row?.today_cost ?? 0 },
+      week: { tokens: row?.week_tokens ?? 0, cost_cents: row?.week_cost ?? 0 },
+      month: { tokens: row?.month_tokens ?? 0, cost_cents: row?.month_cost ?? 0 },
+    };
+  }
+
+  /** Cost breakdown by session or service_type for a period. */
+  getCostBreakdown(
+    period: "today" | "week" | "month" | "all",
+    groupBy: "session" | "service_type"
+  ): {
+    period: string;
+    total_tokens: number;
+    total_cost_cents: number;
+    breakdown: Array<{
+      group_key: string;
+      tokens: number;
+      cost_cents: number;
+      percentage: number;
+    }>;
+  } {
+    const periodExpr: Record<string, string | null> = {
+      today: "datetime('now', 'start of day')",
+      week: "datetime('now', '-7 days')",
+      month: "datetime('now', '-30 days')",
+      all: null,
+    };
+    const startExpr = periodExpr[period];
+    const periodFilter = startExpr ? `AND am.window_start >= ${startExpr}` : "";
+
+    const totalsRow = this.db
+      .prepare(
+        `SELECT
+           CAST(COALESCE(SUM(token_count), 0) AS INTEGER) AS total_tokens,
+           CAST(COALESCE(SUM(cost_cents), 0) AS INTEGER) AS total_cost_cents
+         FROM agent_metrics am WHERE 1=1 ${periodFilter}`
+      )
+      .get() as any;
+    const total_tokens = totalsRow?.total_tokens ?? 0;
+    const total_cost_cents = totalsRow?.total_cost_cents ?? 0;
+
+    let breakdownSql: string;
+    if (groupBy === "session") {
+      breakdownSql = `
+        SELECT
+          am.session_id AS group_key,
+          CAST(SUM(am.token_count) AS INTEGER) AS tokens,
+          CAST(SUM(am.cost_cents) AS INTEGER) AS cost_cents
+        FROM agent_metrics am
+        WHERE 1=1 ${periodFilter}
+        GROUP BY am.session_id
+        ORDER BY cost_cents DESC`;
+    } else {
+      breakdownSql = `
+        SELECT
+          s.service_type AS group_key,
+          CAST(SUM(am.token_count) AS INTEGER) AS tokens,
+          CAST(SUM(am.cost_cents) AS INTEGER) AS cost_cents
+        FROM agent_metrics am
+        JOIN agent_sessions s ON s.id = am.session_id
+        WHERE 1=1 ${periodFilter}
+        GROUP BY s.service_type
+        ORDER BY cost_cents DESC`;
+    }
+
+    const rows = this.db.prepare(breakdownSql).all() as any[];
+    const breakdown = rows.map((r) => ({
+      group_key: String(r.group_key),
+      tokens: r.tokens,
+      cost_cents: r.cost_cents,
+      percentage:
+        total_cost_cents > 0
+          ? Math.round((r.cost_cents / total_cost_cents) * 1000) / 10
+          : 0,
+    }));
+
+    return { period, total_tokens, total_cost_cents, breakdown };
+  }
+
+  /** For anomaly detection: session token rates over a lookback window. */
+  getSessionTokenRates(
+    lookbackMinutes: number,
+    minDurationMinutes: number
+  ): Array<{
+    session_id: string;
+    total_tokens: number;
+    total_cost_cents: number;
+    duration_minutes: number;
+    tokens_per_minute: number;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT
+           am.session_id,
+           CAST(SUM(am.token_count) AS INTEGER) AS total_tokens,
+           CAST(SUM(am.cost_cents) AS INTEGER) AS total_cost_cents,
+           CAST((JULIANDAY(MAX(am.window_end)) - JULIANDAY(MIN(am.window_start))) * 24.0 * 60.0 AS REAL) AS duration_minutes
+         FROM agent_metrics am
+         JOIN agent_sessions s ON s.id = am.session_id
+         WHERE s.status IN ('active', 'idle')
+           AND am.window_start >= datetime('now', '-' || ? || ' minutes')
+         GROUP BY am.session_id
+         HAVING duration_minutes >= ?`
+      )
+      .all(lookbackMinutes, minDurationMinutes) as any[];
+
+    return rows.map((r) => ({
+      session_id: r.session_id,
+      total_tokens: r.total_tokens,
+      total_cost_cents: r.total_cost_cents,
+      duration_minutes: r.duration_minutes,
+      tokens_per_minute:
+        r.duration_minutes > 0 ? r.total_tokens / r.duration_minutes : 0,
+    }));
+  }
+
   // --- Internal ---
+
+  private rowToSession(row: any): AgentSession {
+    return {
+      id: row.id,
+      service_type: row.service_type,
+      session_kind: row.session_kind,
+      status: row.status,
+      health_level: row.health_level,
+      machine_id: row.machine_id,
+      current_task: row.current_task,
+      worktree_path: row.worktree_path,
+      total_tokens: row.total_tokens,
+      total_cost_cents: row.total_cost_cents,
+      context_usage_percent: row.context_usage_percent,
+      started_at: row.started_at,
+      last_event_at: row.last_event_at,
+      ended_at: row.ended_at,
+      end_reason: row.end_reason,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
+  }
+
+  private rowToEvent(row: any): StoredAgentEvent {
+    return {
+      id: row.id,
+      session_id: row.session_id,
+      service_type: row.service_type,
+      event_type: row.event_type,
+      event_name: row.event_name,
+      detail: row.detail ? JSON.parse(row.detail) : null,
+      token_count: row.token_count,
+      cost_cents: row.cost_cents,
+      source: row.source,
+      machine_id: row.machine_id,
+      timestamp: row.timestamp,
+      created_at: row.created_at,
+    };
+  }
 
   private rowToMachine(row: any): Machine {
     return {
