@@ -1,15 +1,14 @@
 {
   "name": "@seed/router",
-  "version": "0.1.0",
-  "description": "LLM-powered request routing across a fleet of machines",
+  "version": "1.0.0",
+  "description": "Rule-based fleet router with deterministic keyword routing, MLX thinking lifecycle, and jury mode",
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "router": "bun run src/router.ts",
-    "test": "tsx src/test-runner.ts"
+    "start": "bun run src/router.ts",
+    "router": "bun run src/router.ts"
   },
   "dependencies": {
-    "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   }
 }
