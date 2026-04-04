@@ -432,6 +432,45 @@ export interface AgentConfig {
   proxy?: Partial<ProxyConfig>;
 }
 
+// --- Install Telemetry ---
+
+export type InstallTarget = "agent" | "control-plane";
+export type InstallStatus = "in_progress" | "success" | "failed" | "aborted";
+export type InstallEventStatus = "started" | "ok" | "failed" | "retrying";
+
+export interface InstallSession {
+  install_id: string;
+  machine_id: string | null;
+  target: InstallTarget;
+  os: string | null;
+  arch: string | null;
+  started_at: string;
+  completed_at: string | null;
+  status: InstallStatus;
+  steps_total: number | null;
+  steps_completed: number;
+  last_step: string | null;
+  last_error: string | null;
+  env: Record<string, unknown> | null;
+}
+
+export interface InstallEvent {
+  id: number;
+  install_id: string;
+  timestamp: string;
+  step: string;
+  status: InstallEventStatus;
+  details: Record<string, unknown> | null;
+}
+
+export interface InstallEventInput {
+  install_id: string;
+  step: string;
+  status: InstallEventStatus;
+  details?: Record<string, unknown> | null;
+  timestamp?: string;
+}
+
 // --- Connected Machine (in-memory state) ---
 
 export interface ConnectedMachine {

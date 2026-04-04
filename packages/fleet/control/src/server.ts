@@ -13,6 +13,12 @@ import type {
 } from "./types";
 import { ACTION_WHITELIST } from "./types";
 import type { TelemetryPipeline } from "./telemetry";
+import { generateHints } from "./install-hints";
+import type {
+  InstallStatus,
+  InstallEventStatus,
+  InstallTarget,
+} from "./types";
 import {
   detectServiceType,
   normalizeHookPayload,
@@ -28,6 +34,33 @@ import {
 const PING_INTERVAL_MS = 30_000;
 const MAX_MISSED_PONGS = 3;
 const HEALTH_PERSIST_INTERVAL_MS = 5 * 60_000;
+
+/** Rate limit for the unauthenticated install telemetry endpoint. */
+const INSTALL_RATE_LIMIT = 60; // requests
+const INSTALL_RATE_WINDOW_MS = 60_000; // per minute
+
+interface InstallRateState {
+  /** install_id → array of timestamps (ms) within the rolling window */
+  buckets: Map<string, number[]>;
+}
+
+function checkInstallRate(
+  state: InstallRateState,
+  installId: string,
+  now: number = Date.now()
+): boolean {
+  const cutoff = now - INSTALL_RATE_WINDOW_MS;
+  const bucket = state.buckets.get(installId) ?? [];
+  // Drop expired timestamps
+  const fresh = bucket.filter((t) => t > cutoff);
+  if (fresh.length >= INSTALL_RATE_LIMIT) {
+    state.buckets.set(installId, fresh);
+    return false;
+  }
+  fresh.push(now);
+  state.buckets.set(installId, fresh);
+  return true;
+}
 
 /** WS object used by the dashboard broadcaster. */
 export interface DashboardWsLike {
@@ -48,6 +81,7 @@ export interface ControlPlaneState {
   pingInterval?: ReturnType<typeof setInterval>;
   healthPersistInterval?: ReturnType<typeof setInterval>;
   telemetryUnsubscribers: Array<() => void>;
+  installRate: InstallRateState;
 }
 
 export function createState(
@@ -64,6 +98,7 @@ export function createState(
     startedAt: Date.now(),
     operatorTokenHash: operatorTokenHash ?? null,
     telemetryUnsubscribers: [],
+    installRate: { buckets: new Map() },
   };
 
   // Wire telemetry pipeline → dashboard broadcaster
@@ -175,6 +210,10 @@ export function createApp(state: ControlPlaneState): Hono {
     if (!state.operatorTokenHash) return next();
     const path = new URL(c.req.url).pathname;
     if (path === "/v1/fleet/register") return next();
+    // Install telemetry is unauthenticated by design — machines aren't
+    // registered yet during install, so we can't gate on a bearer token.
+    // Abuse is bounded by a per-install_id rate limiter.
+    if (path === "/v1/install/event") return next();
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token) return c.json({ error: "unauthorized" }, 401);
     const hash = await hashToken(token);
@@ -634,6 +673,182 @@ export function createApp(state: ControlPlaneState): Hono {
       return c.json({ error: "invalid group_by" }, 400);
     }
     return c.json(db.getCostBreakdown(period, groupBy));
+  });
+
+  // --- Install Telemetry ---
+  //
+  // `/v1/install/event` is unauthenticated: during install, the machine
+  // hasn't been approved yet, so there's no token to gate on. We rate
+  // limit per-install_id to prevent abuse and record everything into
+  // `install_sessions` + `install_events` so operators can observe
+  // installs in real-time from the CLI.
+
+  app.post("/v1/install/event", async (c) => {
+    let body: {
+      install_id?: unknown;
+      step?: unknown;
+      status?: unknown;
+      machine_id?: unknown;
+      target?: unknown;
+      os?: unknown;
+      arch?: unknown;
+      details?: unknown;
+      env?: unknown;
+      timestamp?: unknown;
+      steps_total?: unknown;
+    };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: "invalid JSON" }, 400);
+    }
+
+    const installId =
+      typeof body.install_id === "string" ? body.install_id.trim() : "";
+    const step = typeof body.step === "string" ? body.step.trim() : "";
+    const status =
+      typeof body.status === "string" ? (body.status as InstallEventStatus) : "";
+    if (!installId || !step || !status) {
+      return c.json(
+        { error: "install_id, step, and status required" },
+        400
+      );
+    }
+    if (!["started", "ok", "failed", "retrying"].includes(status)) {
+      return c.json({ error: `invalid status: ${status}` }, 400);
+    }
+
+    // Rate limit check
+    if (!checkInstallRate(state.installRate, installId)) {
+      return c.json(
+        { error: "rate limit exceeded (60/min per install_id)" },
+        429
+      );
+    }
+
+    const details =
+      body.details && typeof body.details === "object" && !Array.isArray(body.details)
+        ? (body.details as Record<string, unknown>)
+        : null;
+    const timestamp =
+      typeof body.timestamp === "string" ? body.timestamp : new Date().toISOString();
+
+    // Upsert session. Create on first event (or `install.started`).
+    let session = db.getInstallSession(installId);
+    if (!session) {
+      const target: InstallTarget =
+        body.target === "control-plane" ? "control-plane" : "agent";
+      const env =
+        body.env && typeof body.env === "object" && !Array.isArray(body.env)
+          ? (body.env as Record<string, unknown>)
+          : null;
+      session = db.createInstallSession({
+        install_id: installId,
+        machine_id:
+          typeof body.machine_id === "string" ? body.machine_id : null,
+        target,
+        os: typeof body.os === "string" ? body.os : null,
+        arch: typeof body.arch === "string" ? body.arch : null,
+        env,
+        started_at: timestamp,
+      });
+    }
+
+    // Fill in machine_id/target/os/arch if newly known.
+    const sessionUpdates: Parameters<typeof db.updateInstallSession>[1] = {};
+    if (
+      typeof body.machine_id === "string" &&
+      body.machine_id &&
+      !session.machine_id
+    ) {
+      sessionUpdates.machine_id = body.machine_id;
+    }
+    if (typeof body.steps_total === "number" && !session.steps_total) {
+      sessionUpdates.steps_total = body.steps_total;
+    }
+
+    // Record the event
+    const recorded = db.recordInstallEvent({
+      install_id: installId,
+      step,
+      status,
+      details,
+      timestamp,
+    });
+
+    // Update session state based on the event
+    sessionUpdates.last_step = step;
+    if (status === "ok") {
+      sessionUpdates.steps_completed = session.steps_completed + 1;
+    } else if (status === "failed") {
+      const errMsg =
+        details && typeof details.error === "string"
+          ? details.error
+          : typeof details?.error_type === "string"
+            ? details.error_type
+            : `failed at step ${step}`;
+      sessionUpdates.last_error = errMsg;
+    }
+
+    // Terminal states
+    if (step === "install.complete" && status === "ok") {
+      sessionUpdates.status = "success";
+      sessionUpdates.completed_at = timestamp;
+    } else if (step === "install.complete" && status === "failed") {
+      sessionUpdates.status = "failed";
+      sessionUpdates.completed_at = timestamp;
+    } else if (step === "install.aborted") {
+      sessionUpdates.status = "aborted";
+      sessionUpdates.completed_at = timestamp;
+    }
+
+    db.updateInstallSession(installId, sessionUpdates);
+    const updatedSession = db.getInstallSession(installId)!;
+
+    // Generate hints from the event + recent history
+    const recentEvents = db.listInstallEvents(installId);
+    const hints = generateHints(
+      { install_id: installId, step, status, details, timestamp },
+      updatedSession,
+      // Exclude the event we just inserted so prior-failure counts don't
+      // include the one we're responding to.
+      recentEvents.filter((e) => e.id !== recorded.id)
+    );
+
+    const abort = hints.some((h) => h.action === "abort");
+    return c.json({ ack: true, install_id: installId, hints, abort });
+  });
+
+  app.get("/v1/installs", (c) => {
+    const status = c.req.query("status") as InstallStatus | undefined;
+    const machineId = c.req.query("machine_id") ?? undefined;
+    const limit = Math.max(
+      1,
+      Math.min(200, Number(c.req.query("limit") ?? 50))
+    );
+    const sessions = db.listInstallSessions({
+      status,
+      machine_id: machineId,
+      limit,
+    });
+    return c.json({ data: sessions, pagination: { limit } });
+  });
+
+  app.get("/v1/installs/:install_id", (c) => {
+    const id = c.req.param("install_id");
+    const session = db.getInstallSession(id);
+    if (!session) return c.json({ error: "not found" }, 404);
+    const events = db.listInstallEvents(id);
+    return c.json({ session, events });
+  });
+
+  app.get("/v1/installs/:install_id/events", (c) => {
+    const id = c.req.param("install_id");
+    const session = db.getInstallSession(id);
+    if (!session) return c.json({ error: "not found" }, 404);
+    const since = c.req.query("since") ?? undefined;
+    const events = db.listInstallEvents(id, { since });
+    return c.json({ data: events });
   });
 
   // --- Audit ---

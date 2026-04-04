@@ -15,6 +15,11 @@ import type {
   EventCategory,
   NormalizedEvent,
   MetricWindow,
+  InstallSession,
+  InstallEvent,
+  InstallTarget,
+  InstallStatus,
+  InstallEventStatus,
 } from "./types";
 
 export class ControlDB {
@@ -149,6 +154,37 @@ export class ControlDB {
 
       CREATE INDEX IF NOT EXISTS idx_metrics_session ON agent_metrics(session_id);
       CREATE INDEX IF NOT EXISTS idx_metrics_window ON agent_metrics(window_start);
+
+      -- --- Install Telemetry ---
+      CREATE TABLE IF NOT EXISTS install_sessions (
+        install_id TEXT PRIMARY KEY,
+        machine_id TEXT,
+        target TEXT NOT NULL,
+        os TEXT,
+        arch TEXT,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        status TEXT NOT NULL,
+        steps_total INTEGER,
+        steps_completed INTEGER DEFAULT 0,
+        last_step TEXT,
+        last_error TEXT,
+        env TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS install_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        install_id TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        step TEXT NOT NULL,
+        status TEXT NOT NULL,
+        details TEXT,
+        FOREIGN KEY (install_id) REFERENCES install_sessions(install_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_install_events_install_id ON install_events(install_id);
+      CREATE INDEX IF NOT EXISTS idx_install_events_timestamp ON install_events(timestamp);
+      CREATE INDEX IF NOT EXISTS idx_install_sessions_status ON install_sessions(status);
     `);
   }
 
@@ -935,6 +971,211 @@ export class ControlDB {
     return {
       ...row,
       last_health: row.last_health ? JSON.parse(row.last_health) : null,
+    };
+  }
+
+  // --- Install Telemetry ---
+
+  createInstallSession(input: {
+    install_id: string;
+    machine_id?: string | null;
+    target: InstallTarget;
+    os?: string | null;
+    arch?: string | null;
+    env?: Record<string, unknown> | null;
+    started_at?: string;
+  }): InstallSession {
+    const startedAt = input.started_at ?? new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO install_sessions
+           (install_id, machine_id, target, os, arch, started_at, status, env)
+         VALUES (?, ?, ?, ?, ?, ?, 'in_progress', ?)
+         ON CONFLICT(install_id) DO NOTHING`
+      )
+      .run(
+        input.install_id,
+        input.machine_id ?? null,
+        input.target,
+        input.os ?? null,
+        input.arch ?? null,
+        startedAt,
+        input.env ? JSON.stringify(input.env) : null
+      );
+    return this.getInstallSession(input.install_id)!;
+  }
+
+  recordInstallEvent(input: {
+    install_id: string;
+    step: string;
+    status: InstallEventStatus;
+    details?: Record<string, unknown> | null;
+    timestamp?: string;
+  }): InstallEvent {
+    const timestamp = input.timestamp ?? new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `INSERT INTO install_events (install_id, timestamp, step, status, details)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(
+        input.install_id,
+        timestamp,
+        input.step,
+        input.status,
+        input.details ? JSON.stringify(input.details) : null
+      );
+    return {
+      id: Number(result.lastInsertRowid),
+      install_id: input.install_id,
+      timestamp,
+      step: input.step,
+      status: input.status,
+      details: input.details ?? null,
+    };
+  }
+
+  updateInstallSession(
+    install_id: string,
+    updates: {
+      machine_id?: string | null;
+      status?: InstallStatus;
+      steps_total?: number | null;
+      steps_completed?: number;
+      last_step?: string | null;
+      last_error?: string | null;
+      completed_at?: string | null;
+    }
+  ): InstallSession | null {
+    const sets: string[] = [];
+    const params: any[] = [];
+
+    if (updates.machine_id !== undefined) {
+      sets.push("machine_id = ?");
+      params.push(updates.machine_id);
+    }
+    if (updates.status !== undefined) {
+      sets.push("status = ?");
+      params.push(updates.status);
+    }
+    if (updates.steps_total !== undefined) {
+      sets.push("steps_total = ?");
+      params.push(updates.steps_total);
+    }
+    if (updates.steps_completed !== undefined) {
+      sets.push("steps_completed = ?");
+      params.push(updates.steps_completed);
+    }
+    if (updates.last_step !== undefined) {
+      sets.push("last_step = ?");
+      params.push(updates.last_step);
+    }
+    if (updates.last_error !== undefined) {
+      sets.push("last_error = ?");
+      params.push(updates.last_error);
+    }
+    if (updates.completed_at !== undefined) {
+      sets.push("completed_at = ?");
+      params.push(updates.completed_at);
+    }
+    if (sets.length === 0) return this.getInstallSession(install_id);
+    params.push(install_id);
+    this.db
+      .prepare(
+        `UPDATE install_sessions SET ${sets.join(", ")} WHERE install_id = ?`
+      )
+      .run(...params);
+    return this.getInstallSession(install_id);
+  }
+
+  getInstallSession(install_id: string): InstallSession | null {
+    const row = this.db
+      .prepare("SELECT * FROM install_sessions WHERE install_id = ?")
+      .get(install_id) as any;
+    return row ? this.rowToInstallSession(row) : null;
+  }
+
+  listInstallSessions(opts?: {
+    status?: InstallStatus;
+    machine_id?: string;
+    limit?: number;
+  }): InstallSession[] {
+    const conditions: string[] = [];
+    const params: any[] = [];
+    if (opts?.status) {
+      conditions.push("status = ?");
+      params.push(opts.status);
+    }
+    if (opts?.machine_id) {
+      conditions.push("machine_id = ?");
+      params.push(opts.machine_id);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const limit = opts?.limit ?? 50;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM install_sessions ${where}
+         ORDER BY started_at DESC LIMIT ?`
+      )
+      .all(...params, limit) as any[];
+    return rows.map((r) => this.rowToInstallSession(r));
+  }
+
+  listInstallEvents(
+    install_id: string,
+    opts?: { since?: string }
+  ): InstallEvent[] {
+    const conditions: string[] = ["install_id = ?"];
+    const params: any[] = [install_id];
+    if (opts?.since) {
+      conditions.push("timestamp > ?");
+      params.push(opts.since);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM install_events WHERE ${conditions.join(" AND ")}
+         ORDER BY id ASC`
+      )
+      .all(...params) as any[];
+    return rows.map((r) => this.rowToInstallEvent(r));
+  }
+
+  latestInstallEvent(install_id: string): InstallEvent | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM install_events WHERE install_id = ?
+         ORDER BY id DESC LIMIT 1`
+      )
+      .get(install_id) as any;
+    return row ? this.rowToInstallEvent(row) : null;
+  }
+
+  private rowToInstallSession(row: any): InstallSession {
+    return {
+      install_id: row.install_id,
+      machine_id: row.machine_id,
+      target: row.target,
+      os: row.os,
+      arch: row.arch,
+      started_at: row.started_at,
+      completed_at: row.completed_at,
+      status: row.status,
+      steps_total: row.steps_total,
+      steps_completed: row.steps_completed ?? 0,
+      last_step: row.last_step,
+      last_error: row.last_error,
+      env: row.env ? JSON.parse(row.env) : null,
+    };
+  }
+
+  private rowToInstallEvent(row: any): InstallEvent {
+    return {
+      id: row.id,
+      install_id: row.install_id,
+      timestamp: row.timestamp,
+      step: row.step,
+      status: row.status,
+      details: row.details ? JSON.parse(row.details) : null,
     };
   }
 
