@@ -28,8 +28,10 @@ import type {
   LoadedModel,
   ActionName,
   CommandEnvelope,
+  ProxyConfig,
 } from "./types";
-import { ACTION_WHITELIST } from "./types";
+import { ACTION_WHITELIST, DEFAULT_PROXY_CONFIG } from "./types";
+import { createProxy, type ProxyHandle, type WsSender } from "./proxy";
 
 const AGENT_VERSION = "0.1.0";
 const HEALTH_INTERVAL_MS = 30_000;
@@ -41,6 +43,32 @@ interface AgentRunConfig {
   machineId: string;
   controlUrl: string;
   token: string | null;
+  proxy: ProxyConfig;
+}
+
+function resolveProxyConfig(
+  fileProxy: Partial<ProxyConfig> | undefined
+): ProxyConfig {
+  // Env-var overrides layer on top of file config and defaults.
+  const envPort = process.env.SEED_PROXY_PORT
+    ? Number(process.env.SEED_PROXY_PORT)
+    : undefined;
+  const envEnabled = process.env.SEED_PROXY_ENABLED
+    ? process.env.SEED_PROXY_ENABLED !== "false"
+    : undefined;
+  const envBufferMax = process.env.SEED_PROXY_BUFFER_MAX
+    ? Number(process.env.SEED_PROXY_BUFFER_MAX)
+    : undefined;
+
+  return {
+    ...DEFAULT_PROXY_CONFIG,
+    ...(fileProxy ?? {}),
+    ...(envEnabled !== undefined ? { enabled: envEnabled } : {}),
+    ...(envPort !== undefined && !isNaN(envPort) ? { listen_port: envPort } : {}),
+    ...(envBufferMax !== undefined && !isNaN(envBufferMax)
+      ? { buffer_max: envBufferMax }
+      : {}),
+  };
 }
 
 function loadConfig(): AgentRunConfig {
@@ -49,33 +77,42 @@ function loadConfig(): AgentRunConfig {
   const controlUrl = process.env.SEED_CONTROL_URL;
   const token = process.env.SEED_AGENT_TOKEN ?? null;
 
-  if (machineId && controlUrl) {
-    return { machineId, controlUrl, token };
-  }
-
-  // Fall back to config file
+  // Fall back to config file — always read it if it exists so we can
+  // pick up the proxy block even when machine_id/control_url come
+  // from env vars.
   const configPath =
     process.env.SEED_AGENT_CONFIG ??
     `${process.env.HOME}/.config/seed-fleet/agent.json`;
+  let fileConfig: {
+    machine_id?: string;
+    control_url?: string;
+    token?: string;
+    proxy?: Partial<ProxyConfig>;
+  } = {};
   try {
-    const file = Bun.file(configPath);
-    // Synchronous check — we need this at startup
     const text = require("fs").readFileSync(configPath, "utf-8");
-    const config = JSON.parse(text);
-    return {
-      machineId: machineId ?? config.machine_id,
-      controlUrl: controlUrl ?? config.control_url,
-      token: token ?? config.token ?? null,
-    };
+    fileConfig = JSON.parse(text);
   } catch {
-    if (!machineId || !controlUrl) {
-      console.error(
-        "SEED_MACHINE_ID and SEED_CONTROL_URL are required (env vars or ~/.config/seed-fleet/agent.json)"
-      );
-      process.exit(1);
-    }
-    return { machineId, controlUrl, token };
+    // no file — fine, we may still have env vars
   }
+
+  const resolvedMachineId = machineId ?? fileConfig.machine_id;
+  const resolvedControlUrl = controlUrl ?? fileConfig.control_url;
+  const resolvedToken = token ?? fileConfig.token ?? null;
+
+  if (!resolvedMachineId || !resolvedControlUrl) {
+    console.error(
+      "SEED_MACHINE_ID and SEED_CONTROL_URL are required (env vars or ~/.config/seed-fleet/agent.json)"
+    );
+    process.exit(1);
+  }
+
+  return {
+    machineId: resolvedMachineId,
+    controlUrl: resolvedControlUrl,
+    token: resolvedToken,
+    proxy: resolveProxyConfig(fileConfig.proxy),
+  };
 }
 
 // --- Cached Config ---
@@ -498,6 +535,7 @@ async function runAgent() {
   let healthInterval: ReturnType<typeof setInterval> | null = null;
   // Track current token (may be updated when approved)
   let currentToken = config.token;
+  let proxyHandle: ProxyHandle | null = null;
 
   function buildWsUrl(): string {
     const base = config.controlUrl.replace(/\/$/, "");
@@ -639,6 +677,11 @@ async function runAgent() {
       healthInterval = setInterval(sendHealth, HEALTH_INTERVAL_MS);
       // Send initial health immediately
       sendHealth();
+
+      // Drain any events that were buffered while disconnected.
+      if (proxyHandle) {
+        proxyHandle.forwarder.flush();
+      }
     };
 
     ws.onmessage = async (event) => {
@@ -784,6 +827,29 @@ async function runAgent() {
     fetch: breakGlassApp.fetch,
   });
   console.log(`[agent] break-glass HTTP on http://127.0.0.1:${BREAK_GLASS_PORT}`);
+
+  // Start Observatory proxy (hook + OTLP receiver) on localhost only.
+  if (config.proxy.enabled) {
+    proxyHandle = createProxy({
+      machineId: config.machineId,
+      config: config.proxy,
+      getWs: (): WsSender | null => {
+        if (!ws) return null;
+        return { readyState: ws.readyState, send: (d) => ws!.send(d) };
+      },
+    });
+    Bun.serve({
+      port: config.proxy.listen_port,
+      hostname: "127.0.0.1",
+      fetch: proxyHandle.app.fetch,
+    });
+    console.log(
+      `[agent] observatory proxy on http://127.0.0.1:${config.proxy.listen_port}` +
+        ` (buffer_max=${config.proxy.buffer_max}, flush_interval_ms=${config.proxy.flush_interval_ms})`
+    );
+  } else {
+    console.log("[agent] observatory proxy disabled");
+  }
 
   // Connect to control plane
   connect();
