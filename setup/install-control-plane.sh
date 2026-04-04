@@ -503,7 +503,7 @@ Operator token (save this — shown once):
 
 Use it to call the REST API:
   export SEED_OPERATOR_TOKEN=$OPERATOR_TOKEN
-  seed fleet status
+  seed status
 
 EOF
 fi

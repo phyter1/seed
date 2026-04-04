@@ -447,7 +447,9 @@ async function cmdJoin(args: string[]) {
 // --- Main ---
 
 async function main() {
-  const args = process.argv.slice(2);
+  const rawArgs = process.argv.slice(2);
+  // Accept both "seed status" and "seed fleet status" — strip leading "fleet" if present
+  const args = rawArgs[0] === "fleet" ? rawArgs.slice(1) : rawArgs;
   const command = args[0];
 
   switch (command) {

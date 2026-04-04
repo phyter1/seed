@@ -347,7 +347,7 @@ if [ -n "$CONTROL_URL" ]; then
   else
     info "Registering machine with control plane"
     report_event "config.generate" "started" "{}"
-    JOIN_ARGS="fleet join '$CONTROL_URL' --machine-id '$MACHINE_ID'"
+    JOIN_ARGS="join '$CONTROL_URL' --machine-id '$MACHINE_ID'"
     [ -n "$DISPLAY_NAME" ] && JOIN_ARGS="$JOIN_ARGS --display-name '$DISPLAY_NAME'"
     if ! run "'$BIN_DIR/seed' $JOIN_ARGS"; then
       report_event "config.generate" "failed" \
@@ -359,7 +359,7 @@ if [ -n "$CONTROL_URL" ]; then
 else
   info "No --control-url provided; skipping registration step"
   info "Run this later to register:"
-  info "  $BIN_DIR/seed fleet join <control-url> --machine-id $MACHINE_ID"
+  info "  $BIN_DIR/seed join <control-url> --machine-id $MACHINE_ID"
 fi
 
 # ------------------------------------------------------------------------
@@ -519,12 +519,12 @@ cat <<EOF
 
 Next steps:
   1. On the control plane host, approve this machine:
-       seed fleet approve $MACHINE_ID
+       seed approve $MACHINE_ID
   2. Tail the log to verify the agent connects:
        tail -f $LOG_PATH
   3. Check service status:
        $SERVICE_HINT
   4. Check status from the control plane:
-       seed fleet status
+       seed status
 
 EOF
