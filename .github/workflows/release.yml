@@ -2,12 +2,9 @@ name: Release
 
 # Publish Seed fleet binaries on version tags (v0.1.0, v1.2.3, ...).
 #
-# Each runner compiles all 9 binaries (arm64 + x64 for darwin, x64 for linux)
-# for agent, cli, and control-plane. We build every target on every runner
-# because `bun build --compile --target=...` can cross-compile. The matrix
-# exists so each artifact is produced on its native host: arm64 on macos-latest,
-# x64 on macos-13, and linux x64 on ubuntu-latest. The upload step only ships
-# the native artifacts from each runner to avoid duplicate release assets.
+# Bun cross-compiles, so we only need two runners:
+# - macos-latest builds both darwin-arm64 and darwin-x64
+# - ubuntu-latest builds linux-x64 (and linux-arm64 if we add it)
 
 on:
   push:
@@ -24,14 +21,11 @@ jobs:
       matrix:
         include:
           - runner: macos-latest
-            os: darwin
-            arch: arm64
-          - runner: macos-13
-            os: darwin
-            arch: x64
+            family: darwin
+            targets: "darwin-arm64 darwin-x64"
           - runner: ubuntu-latest
-            os: linux
-            arch: x64
+            family: linux
+            targets: "linux-x64"
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -42,30 +36,36 @@ jobs:
         with:
           bun-version: latest
 
+      - name: Install dependencies
+        working-directory: packages/fleet/control
+        run: bun install
+
       - name: Build binaries
         working-directory: packages/fleet/control
         run: bash scripts/build-binaries.sh
 
-      - name: Collect native artifacts
+      - name: Collect artifacts for this family
         working-directory: packages/fleet/control
         shell: bash
         run: |
           mkdir -p release-assets
-          cp dist/seed-agent-${{ matrix.os }}-${{ matrix.arch }} release-assets/
-          cp dist/seed-cli-${{ matrix.os }}-${{ matrix.arch }} release-assets/
-          cp dist/seed-control-plane-${{ matrix.os }}-${{ matrix.arch }} release-assets/
-          # Per-target checksums file so all jobs can upload without clobbering.
+          for target in ${{ matrix.targets }}; do
+            cp dist/seed-agent-$target release-assets/
+            cp dist/seed-cli-$target release-assets/
+            cp dist/seed-control-plane-$target release-assets/
+          done
+          # Per-family checksums file so both jobs can upload without clobbering.
           # shasum ships with macOS; sha256sum with Linux.
           if command -v shasum >/dev/null 2>&1; then
-            (cd release-assets && shasum -a 256 seed-* > checksums-${{ matrix.os }}-${{ matrix.arch }}.txt)
+            (cd release-assets && shasum -a 256 seed-* > checksums-${{ matrix.family }}.txt)
           else
-            (cd release-assets && sha256sum seed-* > checksums-${{ matrix.os }}-${{ matrix.arch }}.txt)
+            (cd release-assets && sha256sum seed-* > checksums-${{ matrix.family }}.txt)
           fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: seed-binaries-${{ matrix.os }}-${{ matrix.arch }}
+          name: seed-binaries-${{ matrix.family }}
           path: packages/fleet/control/release-assets/*
           retention-days: 7
 
@@ -83,7 +83,7 @@ jobs:
         working-directory: release-assets
         run: |
           cat checksums-*.txt > checksums.txt
-          rm -f checksums-darwin-*.txt checksums-linux-*.txt
+          rm -f checksums-darwin.txt checksums-linux.txt
           echo "--- checksums.txt ---"
           cat checksums.txt
 
