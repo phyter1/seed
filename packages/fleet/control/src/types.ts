@@ -13,6 +13,7 @@ export interface Machine {
   platform: string | null;
   memory_gb: number | null;
   agent_version: string | null;
+  agent_updated_at: string | null;
   last_seen: string | null;
   last_health: HealthReport | null;
   config_version: number;
