@@ -14,6 +14,48 @@ const PING_INTERVAL_MS = 30_000;
 const MAX_MISSED_PONGS = 3;
 const HEALTH_PERSIST_INTERVAL_MS = 5 * 60_000;
 
+/**
+ * Pluggable sink for telemetry events forwarded by machine agents.
+ *
+ * Task 3 only forwards these events — the real telemetry pipeline
+ * (normalizer, event bus, session tracker, storage) lands in Task 2.
+ * Until then the default sink just counts messages so operators can
+ * verify the proxy is working end to end.
+ */
+export interface TelemetrySink {
+  onHookEvent: (
+    machineId: string,
+    payload: Record<string, unknown>,
+    receivedAt: string
+  ) => void;
+  onOtlpEvent: (
+    machineId: string,
+    signal: "logs" | "metrics",
+    payload: Record<string, unknown>,
+    receivedAt: string
+  ) => void;
+}
+
+export interface TelemetryCounts {
+  hook_events: number;
+  otlp_events: number;
+}
+
+export function createCountingTelemetrySink(): TelemetrySink & {
+  counts: TelemetryCounts;
+} {
+  const counts: TelemetryCounts = { hook_events: 0, otlp_events: 0 };
+  return {
+    counts,
+    onHookEvent: () => {
+      counts.hook_events++;
+    },
+    onOtlpEvent: () => {
+      counts.otlp_events++;
+    },
+  };
+}
+
 export interface ControlPlaneState {
   connections: Map<string, ConnectedMachine>;
   /** Reverse lookup: ws object identity → machine_id */
@@ -21,17 +63,23 @@ export interface ControlPlaneState {
   db: ControlDB;
   startedAt: number;
   operatorTokenHash: string | null;
+  telemetry: TelemetrySink;
   pingInterval?: ReturnType<typeof setInterval>;
   healthPersistInterval?: ReturnType<typeof setInterval>;
 }
 
-export function createState(db: ControlDB, operatorTokenHash?: string): ControlPlaneState {
+export function createState(
+  db: ControlDB,
+  operatorTokenHash?: string,
+  telemetry?: TelemetrySink
+): ControlPlaneState {
   const state: ControlPlaneState = {
     connections: new Map(),
     wsToMachine: new Map(),
     db,
     startedAt: Date.now(),
     operatorTokenHash: operatorTokenHash ?? null,
+    telemetry: telemetry ?? createCountingTelemetrySink(),
   };
 
   // Ping all connected agents every 30s
@@ -447,6 +495,40 @@ export async function handleWsMessage(
     if (msg.status === "applied") {
       db.updateConfigVersion(existingMachineId, msg.version);
     }
+    return;
+  }
+
+  if (msg.type === "hook_event") {
+    // Forwarded from a CLI agent via the machine agent's proxy.
+    // Validate the machine_id matches the authenticated WS so a
+    // compromised agent can't impersonate another machine.
+    if (msg.machine_id !== existingMachineId) {
+      console.warn(
+        `[control] hook_event machine_id mismatch: ${msg.machine_id} via ${existingMachineId}`
+      );
+      return;
+    }
+    state.telemetry.onHookEvent(
+      existingMachineId,
+      msg.payload,
+      msg.received_at
+    );
+    return;
+  }
+
+  if (msg.type === "otlp_event") {
+    if (msg.machine_id !== existingMachineId) {
+      console.warn(
+        `[control] otlp_event machine_id mismatch: ${msg.machine_id} via ${existingMachineId}`
+      );
+      return;
+    }
+    state.telemetry.onOtlpEvent(
+      existingMachineId,
+      msg.signal,
+      msg.payload,
+      msg.received_at
+    );
     return;
   }
 }

@@ -602,6 +602,169 @@ describe("WebSocket message handling", () => {
   });
 });
 
+// --- Forwarded Telemetry Tests ---
+
+describe("forwarded telemetry (hook_event / otlp_event)", () => {
+  async function announceRen1(fakeWs: any) {
+    db.registerMachine("ren1");
+    await handleWsMessage(
+      fakeWs,
+      JSON.stringify({
+        type: "announce",
+        machine_id: "ren1",
+        hostname: "ren1.local",
+        arch: "x86_64",
+        cpu_cores: 8,
+        memory_gb: 32,
+        platform: "linux",
+        agent_version: "0.1.0",
+        config_version: 0,
+        capabilities: [],
+      }),
+      state,
+      {}
+    );
+  }
+
+  test("hook_event is routed to telemetry sink", async () => {
+    const fakeWs = { send: () => {}, close: () => {} };
+    await announceRen1(fakeWs);
+
+    await handleWsMessage(
+      fakeWs,
+      JSON.stringify({
+        type: "hook_event",
+        machine_id: "ren1",
+        received_at: new Date().toISOString(),
+        payload: { event: "PreToolUse", session_id: "abc" },
+      }),
+      state,
+      {}
+    );
+
+    const sink = state.telemetry as any;
+    expect(sink.counts.hook_events).toBe(1);
+  });
+
+  test("otlp_event is routed to telemetry sink with signal", async () => {
+    const fakeWs = { send: () => {}, close: () => {} };
+    await announceRen1(fakeWs);
+
+    await handleWsMessage(
+      fakeWs,
+      JSON.stringify({
+        type: "otlp_event",
+        machine_id: "ren1",
+        received_at: new Date().toISOString(),
+        signal: "logs",
+        payload: { resourceLogs: [] },
+      }),
+      state,
+      {}
+    );
+    await handleWsMessage(
+      fakeWs,
+      JSON.stringify({
+        type: "otlp_event",
+        machine_id: "ren1",
+        received_at: new Date().toISOString(),
+        signal: "metrics",
+        payload: { resourceMetrics: [] },
+      }),
+      state,
+      {}
+    );
+
+    const sink = state.telemetry as any;
+    expect(sink.counts.otlp_events).toBe(2);
+  });
+
+  test("hook_event with spoofed machine_id is dropped", async () => {
+    const fakeWs = { send: () => {}, close: () => {} };
+    await announceRen1(fakeWs);
+
+    await handleWsMessage(
+      fakeWs,
+      JSON.stringify({
+        type: "hook_event",
+        machine_id: "ren2", // WS is authenticated as ren1
+        received_at: new Date().toISOString(),
+        payload: { event: "PreToolUse" },
+      }),
+      state,
+      {}
+    );
+
+    const sink = state.telemetry as any;
+    expect(sink.counts.hook_events).toBe(0);
+  });
+
+  test("hook_event before announce is dropped", async () => {
+    let closed = false;
+    const fakeWs = {
+      send: () => {},
+      close: () => {
+        closed = true;
+      },
+    };
+
+    await handleWsMessage(
+      fakeWs,
+      JSON.stringify({
+        type: "hook_event",
+        machine_id: "ren1",
+        received_at: new Date().toISOString(),
+        payload: { event: "PreToolUse" },
+      }),
+      state,
+      {}
+    );
+
+    expect(closed).toBe(true);
+    const sink = state.telemetry as any;
+    expect(sink.counts.hook_events).toBe(0);
+  });
+
+  test("custom telemetry sink receives full event details", async () => {
+    stopState(state);
+    db.close();
+    cleanup();
+    db = new ControlDB(TEST_DB);
+
+    const hookEvents: Array<{ machineId: string; payload: any }> = [];
+    const otlpEvents: Array<{ machineId: string; signal: string; payload: any }> = [];
+    state = createState(db, undefined, {
+      onHookEvent: (machineId, payload) => {
+        hookEvents.push({ machineId, payload });
+      },
+      onOtlpEvent: (machineId, signal, payload) => {
+        otlpEvents.push({ machineId, signal, payload });
+      },
+    });
+    app = createApp(state);
+
+    const fakeWs = { send: () => {}, close: () => {} };
+    await announceRen1(fakeWs);
+
+    await handleWsMessage(
+      fakeWs,
+      JSON.stringify({
+        type: "hook_event",
+        machine_id: "ren1",
+        received_at: new Date().toISOString(),
+        payload: { event: "PostToolUse", tool: "Bash" },
+      }),
+      state,
+      {}
+    );
+
+    expect(hookEvents.length).toBe(1);
+    expect(hookEvents[0].machineId).toBe("ren1");
+    expect(hookEvents[0].payload.event).toBe("PostToolUse");
+    expect(hookEvents[0].payload.tool).toBe("Bash");
+  });
+});
+
 // --- Auth Middleware Tests ---
 
 describe("operator auth", () => {
