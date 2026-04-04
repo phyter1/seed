@@ -1,10 +1,14 @@
 #!/bin/bash
-# Seed — Turnkey agent install for fresh macOS machines.
+# Seed — Turnkey agent install for fresh macOS or Linux machines.
 #
 # Downloads a pre-built seed-agent binary from GitHub Releases, installs it
 # to ~/.local/bin, registers the machine with a control plane, and starts
-# the agent as a launchd service. No Xcode CLI Tools, no git, no bun, no
-# source code on the target machine.
+# the agent as a user-scoped service (launchd on macOS, systemd --user on
+# Linux). No Xcode CLI Tools, no git, no bun, no source code on the target.
+#
+# On Linux, the installer may call `sudo loginctl enable-linger` exactly
+# once — only if lingering is not already enabled for the current user.
+# No other sudo calls are made.
 #
 # Usage (one-liner):
 #   curl -sSL https://raw.githubusercontent.com/phyter1/seed/main/setup/install.sh | sh -s -- \
@@ -29,11 +33,15 @@ set -euo pipefail
 # ------------------------------------------------------------------------
 REPO="phyter1/seed"
 BIN_DIR="$HOME/.local/bin"
-PLIST_PATH="$HOME/Library/LaunchAgents/com.seed.agent.plist"
-LOG_PATH="$HOME/Library/Logs/seed-agent.log"
 CONFIG_DIR="$HOME/.config/seed-fleet"
 AGENT_CONFIG="$CONFIG_DIR/agent.json"
 SERVICE_LABEL="com.seed.agent"
+
+# Platform-specific paths (resolved after OS detection).
+PLIST_PATH=""
+LOG_PATH=""
+SYSTEMD_UNIT_PATH=""
+LINUX_LOG_DIR=""
 
 VERSION="latest"
 CONTROL_URL=""
@@ -78,20 +86,51 @@ while [ $# -gt 0 ]; do
 done
 
 # ------------------------------------------------------------------------
-# Sanity checks
+# OS + architecture detection
 # ------------------------------------------------------------------------
-OS="$(uname -s)"
-[ "$OS" = "Darwin" ] || die "this installer only supports macOS (saw: $OS)"
-
-for tool in curl shasum launchctl; do
-  command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
-done
+OS_NAME="$(uname -s)"
+case "$OS_NAME" in
+  Darwin) OS="darwin" ;;
+  Linux)  OS="linux" ;;
+  *)      die "unsupported OS: $OS_NAME (supported: Darwin, Linux)" ;;
+esac
 
 RAW_ARCH="$(uname -m)"
-case "$RAW_ARCH" in
-  arm64)  ARCH="arm64" ;;
-  x86_64) ARCH="x64" ;;
-  *) die "unsupported architecture: $RAW_ARCH" ;;
+case "$OS:$RAW_ARCH" in
+  darwin:arm64)  ARCH="arm64" ;;
+  darwin:x86_64) ARCH="x64" ;;
+  linux:x86_64)  ARCH="x64" ;;
+  linux:aarch64) die "linux arm64 is not yet a published release target" ;;
+  *) die "unsupported architecture for $OS: $RAW_ARCH" ;;
+esac
+
+# Required tools per OS
+case "$OS" in
+  darwin)
+    for tool in curl shasum launchctl; do
+      command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
+    done
+    PLIST_PATH="$HOME/Library/LaunchAgents/com.seed.agent.plist"
+    LOG_PATH="$HOME/Library/Logs/seed-agent.log"
+    ;;
+  linux)
+    for tool in curl sha256sum systemctl; do
+      command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
+    done
+    # Verify systemctl --user works (user bus must be reachable).
+    if [ "$DRY_RUN" = false ]; then
+      if ! systemctl --user status >/dev/null 2>&1; then
+        # systemctl --user returns nonzero when no units running; real failure
+        # is "Failed to connect to bus". Probe with daemon-reload instead.
+        if ! systemctl --user daemon-reload >/dev/null 2>&1; then
+          die "systemctl --user is not available (need a user systemd instance)"
+        fi
+      fi
+    fi
+    SYSTEMD_UNIT_PATH="$HOME/.config/systemd/user/seed-agent.service"
+    LINUX_LOG_DIR="$HOME/.local/state/seed-agent"
+    LOG_PATH="$LINUX_LOG_DIR/agent.log"
+    ;;
 esac
 
 [ -z "$MACHINE_ID" ] && MACHINE_ID="$(hostname -s)"
@@ -99,7 +138,7 @@ esac
 info "Seed turnkey agent install"
 info "  repo:        $REPO"
 info "  version:     $VERSION"
-info "  arch:        darwin-$ARCH"
+info "  arch:        $OS-$ARCH"
 info "  machine id:  $MACHINE_ID"
 info "  control url: ${CONTROL_URL:-<not set — will install binaries only>}"
 info "  dry-run:     $DRY_RUN"
@@ -128,8 +167,8 @@ fi
 info "Release tag: $TAG"
 
 BASE="https://github.com/$REPO/releases/download/$TAG"
-AGENT_ASSET="seed-agent-darwin-$ARCH"
-CLI_ASSET="seed-cli-darwin-$ARCH"
+AGENT_ASSET="seed-agent-$OS-$ARCH"
+CLI_ASSET="seed-cli-$OS-$ARCH"
 CHECKSUMS_ASSET="checksums.txt"
 
 TMP_DIR="$(mktemp -d)"
@@ -151,14 +190,22 @@ download "$CLI_ASSET" "$TMP_DIR/$CLI_ASSET"
 download "$CHECKSUMS_ASSET" "$TMP_DIR/$CHECKSUMS_ASSET"
 
 # ------------------------------------------------------------------------
-# Verify checksums
+# Verify checksums (shasum on macOS, sha256sum on Linux)
 # ------------------------------------------------------------------------
+sha256_of() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+
 if [ "$DRY_RUN" = false ]; then
   info "Verifying SHA-256 checksums"
   for asset in "$AGENT_ASSET" "$CLI_ASSET"; do
     expected="$(grep " $asset\$" "$TMP_DIR/$CHECKSUMS_ASSET" | awk '{print $1}')"
     [ -n "$expected" ] || die "no checksum entry for $asset"
-    actual="$(shasum -a 256 "$TMP_DIR/$asset" | awk '{print $1}')"
+    actual="$(sha256_of "$TMP_DIR/$asset")"
     if [ "$expected" != "$actual" ]; then
       die "checksum mismatch for $asset: expected $expected, got $actual"
     fi
@@ -202,12 +249,14 @@ else
 fi
 
 # ------------------------------------------------------------------------
-# Install launchd plist
+# Install + load service (platform-specific)
 # ------------------------------------------------------------------------
-info "Installing launchd plist at $PLIST_PATH"
-run "mkdir -p '$HOME/Library/LaunchAgents' '$HOME/Library/Logs' '$CONFIG_DIR'"
+case "$OS" in
+  darwin)
+    info "Installing launchd plist at $PLIST_PATH"
+    run "mkdir -p '$HOME/Library/LaunchAgents' '$HOME/Library/Logs' '$CONFIG_DIR'"
 
-PLIST_CONTENTS=$(cat <<EOF
+    PLIST_CONTENTS=$(cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -244,31 +293,95 @@ PLIST_CONTENTS=$(cat <<EOF
 EOF
 )
 
-if [ "$DRY_RUN" = true ]; then
-  printf '  + write plist to %s\n' "$PLIST_PATH"
-else
-  printf '%s\n' "$PLIST_CONTENTS" > "$PLIST_PATH.tmp"
-  mv "$PLIST_PATH.tmp" "$PLIST_PATH"
-fi
+    if [ "$DRY_RUN" = true ]; then
+      printf '  + write plist to %s\n' "$PLIST_PATH"
+    else
+      printf '%s\n' "$PLIST_CONTENTS" > "$PLIST_PATH.tmp"
+      mv "$PLIST_PATH.tmp" "$PLIST_PATH"
+    fi
 
-# ------------------------------------------------------------------------
-# Load the launchd service (idempotent)
-# ------------------------------------------------------------------------
-info "Loading launchd service $SERVICE_LABEL"
-# Unload first so a re-run picks up any plist changes; ignore failure.
-run "launchctl unload '$PLIST_PATH' 2>/dev/null || true"
-run "launchctl load '$PLIST_PATH'"
+    info "Loading launchd service $SERVICE_LABEL"
+    # Unload first so a re-run picks up any plist changes; ignore failure.
+    run "launchctl unload '$PLIST_PATH' 2>/dev/null || true"
+    run "launchctl load '$PLIST_PATH'"
+    ;;
+
+  linux)
+    info "Installing systemd user unit at $SYSTEMD_UNIT_PATH"
+    run "mkdir -p '$(dirname "$SYSTEMD_UNIT_PATH")' '$LINUX_LOG_DIR' '$CONFIG_DIR'"
+
+    SYSTEMD_CONTENTS=$(cat <<EOF
+[Unit]
+Description=Seed fleet agent daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$BIN_DIR/seed-agent
+Restart=always
+RestartSec=10
+Environment="SEED_AGENT_CONFIG=$AGENT_CONFIG"
+Environment="HOME=$HOME"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+StandardOutput=append:$LOG_PATH
+StandardError=append:$LOG_PATH
+
+[Install]
+WantedBy=default.target
+EOF
+)
+
+    if [ "$DRY_RUN" = true ]; then
+      printf '  + write systemd unit to %s\n' "$SYSTEMD_UNIT_PATH"
+    else
+      printf '%s\n' "$SYSTEMD_CONTENTS" > "$SYSTEMD_UNIT_PATH.tmp"
+      mv "$SYSTEMD_UNIT_PATH.tmp" "$SYSTEMD_UNIT_PATH"
+    fi
+
+    # Enable lingering so the user service survives logout (only one sudo call).
+    LINGER_STATE="$(loginctl show-user "$USER" 2>/dev/null | sed -n 's/^Linger=//p' | head -n1)"
+    if [ "$LINGER_STATE" = "yes" ]; then
+      info "Lingering already enabled for $USER"
+    else
+      info "Enabling systemd lingering for $USER (one-time sudo call)"
+      run "sudo loginctl enable-linger '$USER'"
+    fi
+
+    info "Reloading systemd user daemon and starting service"
+    run "systemctl --user daemon-reload"
+    run "systemctl --user enable --now seed-agent.service"
+    ;;
+esac
 
 # ------------------------------------------------------------------------
 # Next steps
 # ------------------------------------------------------------------------
+SERVICE_HINT=""
+case "$OS" in
+  darwin)
+    SERVICE_HINT="launchctl list | grep com.seed.agent"
+    ;;
+  linux)
+    SERVICE_HINT="systemctl --user status seed-agent"
+    ;;
+esac
+
 cat <<EOF
 
 Agent installed.
 
   Binary:  $BIN_DIR/seed-agent
   CLI:     $BIN_DIR/seed
-  Plist:   $PLIST_PATH
+EOF
+
+if [ "$OS" = "darwin" ]; then
+  printf '  Plist:   %s\n' "$PLIST_PATH"
+else
+  printf '  Unit:    %s\n' "$SYSTEMD_UNIT_PATH"
+fi
+
+cat <<EOF
   Config:  $AGENT_CONFIG
   Logs:    $LOG_PATH
 
@@ -277,7 +390,9 @@ Next steps:
        seed fleet approve $MACHINE_ID
   2. Tail the log to verify the agent connects:
        tail -f $LOG_PATH
-  3. Check status from the control plane:
+  3. Check service status:
+       $SERVICE_HINT
+  4. Check status from the control plane:
        seed fleet status
 
 EOF
