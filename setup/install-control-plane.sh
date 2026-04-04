@@ -19,6 +19,9 @@
 #   --operator-token <tok>  Operator bearer token (default: generated)
 #   --db <path>             SQLite DB path (default: ~/.local/share/seed-fleet/control.db)
 #   --version <tag>         Pin a specific release tag (default: latest)
+#   --telemetry-url <url>   Control plane URL to report install events to.
+#                           Defaults to http://localhost:<port> once port
+#                           is known. Set to "" to disable telemetry.
 #   --dry-run               Print actions, download nothing, touch nothing
 #   -h, --help              Show this help
 
@@ -45,6 +48,12 @@ PORT="4310"
 OPERATOR_TOKEN=""
 DB_PATH="$DEFAULT_DB_PATH"
 DRY_RUN=false
+TELEMETRY_URL=""
+TELEMETRY_URL_SET=false
+INSTALL_ID=""
+OS=""
+ARCH=""
+MACHINE_ID="$(hostname -s 2>/dev/null || echo unknown)"
 
 # ------------------------------------------------------------------------
 # Helpers
@@ -76,11 +85,69 @@ while [ $# -gt 0 ]; do
     --operator-token) OPERATOR_TOKEN="$2"; shift 2 ;;
     --db) DB_PATH="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
+    --telemetry-url) TELEMETRY_URL="$2"; TELEMETRY_URL_SET=true; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     -h|--help) usage ;;
     *) die "unknown argument: $1 (use --help)" ;;
   esac
 done
+
+# ------------------------------------------------------------------------
+# Install telemetry (best-effort, never blocks the install)
+# ------------------------------------------------------------------------
+# Default telemetry target: the local control plane we're installing.
+# The server is not running yet, so early events will be log-only, but
+# that matches intent: we're instrumenting the install script itself.
+# For a remote-bootstrapped install, operators can pass --telemetry-url
+# pointing at an already-running control plane.
+if [ "$TELEMETRY_URL_SET" = false ]; then
+  TELEMETRY_URL="http://localhost:$PORT"
+fi
+TELEMETRY_URL="${TELEMETRY_URL%/}"
+
+INSTALL_ID="${MACHINE_ID}-cp-$(date +%Y%m%dT%H%M%S)-${RANDOM}"
+
+report_event() {
+  local step="$1"
+  local status="$2"
+  local details="${3:-{\}}"
+
+  printf '\033[1;90m[telemetry]\033[0m %s %s: %s\n' \
+    "$(date +%H:%M:%S)" "$step" "$status" >&2
+
+  [ -z "$TELEMETRY_URL" ] && return 0
+  [ "$DRY_RUN" = true ] && return 0
+
+  local payload
+  payload=$(cat <<JSON
+{
+  "install_id": "$INSTALL_ID",
+  "machine_id": "$MACHINE_ID",
+  "target": "control-plane",
+  "os": "${OS:-unknown}",
+  "arch": "${ARCH:-unknown}",
+  "step": "$step",
+  "status": "$status",
+  "details": $details,
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+JSON
+)
+
+  local response
+  response=$(curl -sfS --max-time 5 -X POST \
+    "$TELEMETRY_URL/v1/install/event" \
+    -H "Content-Type: application/json" \
+    -d "$payload" 2>/dev/null) || return 0
+
+  [ -z "$response" ] && return 0
+
+  if printf '%s' "$response" | grep -q '"abort":true'; then
+    error "Control plane signaled abort: $response"
+    exit 2
+  fi
+  return 0
+}
 
 # ------------------------------------------------------------------------
 # OS + architecture detection
@@ -136,6 +203,11 @@ else
   GENERATED_TOKEN=false
 fi
 
+report_event "install.started" "ok" \
+  "{\"os\":\"$OS\",\"arch\":\"$ARCH\",\"version\":\"$VERSION\",\"port\":$PORT}"
+report_event "detect.environment" "ok" \
+  "{\"os\":\"$OS\",\"arch\":\"$ARCH\"}"
+
 info "Seed turnkey control plane install"
 info "  repo:     $REPO"
 info "  version:  $VERSION"
@@ -176,12 +248,20 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 download() {
   local asset="$1" dest="$2"
   info "Downloading $asset"
+  report_event "download.binary" "started" "{\"asset\":\"$asset\"}"
   if [ "$DRY_RUN" = true ]; then
     printf '  + curl -sSLf -o %s %s/%s\n' "$dest" "$BASE" "$asset"
+    report_event "download.binary" "ok" "{\"asset\":\"$asset\",\"dry_run\":true}"
     return 0
   fi
-  curl -sSLf -o "$dest" "$BASE/$asset" \
-    || die "failed to download $asset"
+  if ! curl -sSLf -o "$dest" "$BASE/$asset"; then
+    report_event "download.binary" "failed" \
+      "{\"asset\":\"$asset\",\"error_type\":\"network_error\",\"url\":\"$BASE/$asset\"}"
+    die "failed to download $asset"
+  fi
+  local size
+  size=$(stat -f%z "$dest" 2>/dev/null || stat -c%s "$dest" 2>/dev/null || echo 0)
+  report_event "download.binary" "ok" "{\"asset\":\"$asset\",\"size_bytes\":$size}"
 }
 
 download "$BIN_ASSET" "$TMP_DIR/$BIN_ASSET"
@@ -200,11 +280,21 @@ sha256_of() {
 
 if [ "$DRY_RUN" = false ]; then
   info "Verifying SHA-256 checksum"
+  report_event "verify.checksum" "started" "{\"asset\":\"$BIN_ASSET\"}"
   expected="$(grep " $BIN_ASSET\$" "$TMP_DIR/$CHECKSUMS_ASSET" | awk '{print $1}')"
-  [ -n "$expected" ] || die "no checksum entry for $BIN_ASSET"
+  if [ -z "$expected" ]; then
+    report_event "verify.checksum" "failed" \
+      "{\"asset\":\"$BIN_ASSET\",\"error_type\":\"checksum_mismatch\",\"error\":\"no entry\"}"
+    die "no checksum entry for $BIN_ASSET"
+  fi
   actual="$(sha256_of "$TMP_DIR/$BIN_ASSET")"
-  [ "$expected" = "$actual" ] || die "checksum mismatch for $BIN_ASSET"
+  if [ "$expected" != "$actual" ]; then
+    report_event "verify.checksum" "failed" \
+      "{\"asset\":\"$BIN_ASSET\",\"error_type\":\"checksum_mismatch\",\"expected\":\"$expected\",\"actual\":\"$actual\"}"
+    die "checksum mismatch for $BIN_ASSET"
+  fi
   info "  ok  $BIN_ASSET"
+  report_event "verify.checksum" "ok" "{\"asset\":\"$BIN_ASSET\"}"
 else
   info "Skipping checksum verification (dry run)"
 fi
@@ -213,6 +303,7 @@ fi
 # Install binary
 # ------------------------------------------------------------------------
 info "Installing binary to $BIN_DIR"
+report_event "install.binary" "started" "{\"dest\":\"$BIN_DIR\"}"
 case "$OS" in
   darwin)
     run "mkdir -p '$BIN_DIR' '$(dirname "$DB_PATH")' '$CONFIG_DIR' '$HOME/Library/LaunchAgents' '$HOME/Library/Logs'"
@@ -222,6 +313,7 @@ case "$OS" in
     ;;
 esac
 run "install -m 0755 '$TMP_DIR/$BIN_ASSET' '$BIN_DIR/seed-control-plane'"
+report_event "install.binary" "ok" "{\"dest\":\"$BIN_DIR\"}"
 
 # ------------------------------------------------------------------------
 # Persist config (operator token + port)
@@ -237,6 +329,7 @@ EOF
 )
 
 info "Writing control plane config to $CONTROL_PLANE_CONFIG"
+report_event "config.generate" "started" "{\"path\":\"$CONTROL_PLANE_CONFIG\"}"
 if [ "$DRY_RUN" = true ]; then
   printf '  + write 0600-perm config with token to %s\n' "$CONTROL_PLANE_CONFIG"
 else
@@ -245,6 +338,7 @@ else
   chmod 0600 "$CONTROL_PLANE_CONFIG.tmp"
   mv "$CONTROL_PLANE_CONFIG.tmp" "$CONTROL_PLANE_CONFIG"
 fi
+report_event "config.generate" "ok" "{\"path\":\"$CONTROL_PLANE_CONFIG\"}"
 
 # ------------------------------------------------------------------------
 # Install + load service (platform-specific)
@@ -252,6 +346,7 @@ fi
 case "$OS" in
   darwin)
     info "Installing launchd plist at $PLIST_PATH"
+    report_event "service.install" "started" "{\"manager\":\"launchd\",\"path\":\"$PLIST_PATH\"}"
 
     PLIST_CONTENTS=$(cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -303,13 +398,21 @@ EOF
       mv "$PLIST_PATH.tmp" "$PLIST_PATH"
     fi
 
+    report_event "service.install" "ok" "{\"manager\":\"launchd\"}"
     info "Loading launchd service $SERVICE_LABEL"
+    report_event "service.start" "started" "{\"manager\":\"launchd\",\"label\":\"$SERVICE_LABEL\"}"
     run "launchctl unload '$PLIST_PATH' 2>/dev/null || true"
-    run "launchctl load '$PLIST_PATH'"
+    if ! run "launchctl load '$PLIST_PATH'"; then
+      report_event "service.start" "failed" \
+        "{\"manager\":\"launchd\",\"error_type\":\"permission_denied\",\"error\":\"launchctl load failed\"}"
+      die "launchctl load failed"
+    fi
+    report_event "service.start" "ok" "{\"manager\":\"launchd\"}"
     ;;
 
   linux)
     info "Installing systemd user unit at $SYSTEMD_UNIT_PATH"
+    report_event "service.install" "started" "{\"manager\":\"systemd\",\"path\":\"$SYSTEMD_UNIT_PATH\"}"
 
     SYSTEMD_CONTENTS=$(cat <<EOF
 [Unit]
@@ -353,11 +456,20 @@ EOF
       run "sudo loginctl enable-linger '$USER'"
     fi
 
+    report_event "service.install" "ok" "{\"manager\":\"systemd\"}"
     info "Reloading systemd user daemon and starting service"
+    report_event "service.start" "started" "{\"manager\":\"systemd\",\"unit\":\"seed-control-plane.service\"}"
     run "systemctl --user daemon-reload"
-    run "systemctl --user enable --now seed-control-plane.service"
+    if ! run "systemctl --user enable --now seed-control-plane.service"; then
+      report_event "service.start" "failed" \
+        "{\"manager\":\"systemd\",\"error_type\":\"permission_denied\",\"error\":\"systemctl enable --now failed\"}"
+      die "systemctl enable --now seed-control-plane.service failed"
+    fi
+    report_event "service.start" "ok" "{\"manager\":\"systemd\"}"
     ;;
 esac
+
+report_event "install.complete" "ok" "{\"port\":$PORT}"
 
 # ------------------------------------------------------------------------
 # Next steps
