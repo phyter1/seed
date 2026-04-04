@@ -446,7 +446,7 @@ Restart=always
 RestartSec=10
 Environment="SEED_AGENT_CONFIG=$AGENT_CONFIG"
 Environment="HOME=$HOME"
-Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 StandardOutput=append:$LOG_PATH
 StandardError=append:$LOG_PATH
 

@@ -10,7 +10,7 @@ Restart=always
 RestartSec=10
 Environment="SEED_AGENT_CONFIG=@@AGENT_CONFIG@@"
 Environment="HOME=@@HOME@@"
-Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 StandardOutput=append:@@HOME@@/.local/state/seed-agent/agent.log
 StandardError=append:@@HOME@@/.local/state/seed-agent/agent.log
 

@@ -429,7 +429,7 @@ Environment="CONTROL_PORT=$PORT"
 Environment="CONTROL_DB=$DB_PATH"
 Environment="OPERATOR_TOKEN=$OPERATOR_TOKEN"
 Environment="HOME=$HOME"
-Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 StandardOutput=append:$LOG_PATH
 StandardError=append:$LOG_PATH
 
