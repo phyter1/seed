@@ -378,6 +378,59 @@ describe("config endpoints", () => {
   });
 });
 
+describe("service discovery endpoint", () => {
+  test("returns 404 for unknown service", async () => {
+    const res = await req("/v1/services/memory");
+    expect(res.status).toBe(404);
+  });
+
+  test("returns service URL from config", async () => {
+    db.registerMachine("ren1", "ren1.local");
+    await put("/v1/config", {
+      key: "services.memory",
+      value: { host: "ren1", port: 19888, probe: { type: "http", path: "/status" } },
+    });
+    const res = await req("/v1/services/memory");
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.service_id).toBe("memory");
+    expect(data.machine_id).toBe("ren1");
+    expect(data.host).toBe("ren1.local");
+    expect(data.port).toBe(19888);
+    expect(data.url).toBe("http://ren1.local:19888");
+    // No health reported yet → unhealthy
+    expect(data.healthy).toBe(false);
+    expect(data.connected).toBe(false);
+  });
+
+  test("healthy=true when last_health reports service as accepting_connections", async () => {
+    db.registerMachine("ren1", "ren1.local");
+    db.updateLastHealth("ren1", {
+      machine_id: "ren1",
+      timestamp: new Date().toISOString(),
+      system: {} as any,
+      services: [
+        { id: "memory", port: 19888, health_tier: "accepting_connections", details: {} },
+      ],
+      models: [],
+    });
+    await put("/v1/config", {
+      key: "services.memory",
+      value: { host: "ren1", port: 19888, probe: { type: "http", path: "/status" } },
+    });
+    const res = await req("/v1/services/memory");
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.healthy).toBe(true);
+  });
+
+  test("returns 500 for malformed service config", async () => {
+    await put("/v1/config", { key: "services.broken", value: { port: 123 } });
+    const res = await req("/v1/services/broken");
+    expect(res.status).toBe(500);
+  });
+});
+
 describe("audit endpoint", () => {
   test("returns audit entries", async () => {
     db.audit({ event_type: "machine_join", machine_id: "ren1", result: "pending" });
