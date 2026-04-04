@@ -436,6 +436,61 @@ export function createApp(state: ControlPlaneState): Hono {
     return c.json({ command_id: commandId, status: "dispatched" });
   });
 
+  // --- Service Discovery ---
+  //
+  // Looks up a fleet-wide service by id. Services are declared under the
+  // config key `services.<service_id>` with shape `{ host, port, probe? }`
+  // (host is a machine_id). Returns the URL along with a best-effort
+  // `healthy` flag derived from the most recent health report from that
+  // machine. The URL is returned even when unhealthy so callers can retry.
+  app.get("/v1/services/:service_id", (c) => {
+    const serviceId = c.req.param("service_id");
+    const entry = db.getConfig(`services.${serviceId}`);
+    if (!entry) return c.json({ error: "service not found" }, 404);
+    const value = entry.value as {
+      host?: string;
+      port?: number;
+      probe?: { type?: string; path?: string };
+    } | null;
+    if (!value || typeof value.host !== "string" || typeof value.port !== "number") {
+      return c.json({ error: "service config malformed" }, 500);
+    }
+
+    const host = value.host;
+    const port = value.port;
+    const machine = db.getMachine(host);
+    // host in config is the machine_id; the reachable hostname prefers
+    // machines.display_name if set, falling back to the id.
+    const hostname = machine?.display_name ?? host;
+    // Services are HTTP today; if that changes, add scheme to config.
+    const url = `http://${hostname}:${port}`;
+
+    let healthy = false;
+    const conn = state.connections.get(host);
+    const lastHealth = conn?.last_health ?? machine?.last_health ?? null;
+    if (lastHealth && Array.isArray(lastHealth.services)) {
+      const match = lastHealth.services.find(
+        (s) => s.id === serviceId || s.port === port
+      );
+      if (match) {
+        healthy =
+          match.health_tier === "accepting_connections" ||
+          match.health_tier === "serving_requests" ||
+          match.health_tier === "within_sla";
+      }
+    }
+
+    return c.json({
+      service_id: serviceId,
+      host: hostname,
+      machine_id: host,
+      port,
+      url,
+      healthy,
+      connected: !!conn,
+    });
+  });
+
   // --- Config ---
 
   app.get("/v1/config", (c) => {
