@@ -7,7 +7,7 @@
  *
  * Bump this in lockstep with the `v*.*.*` tag used to cut a release.
  */
-export const SEED_VERSION = "0.3.0";
+export const SEED_VERSION = "0.3.1";
 
 /** GitHub repo that publishes releases (owner/name). */
 export const SEED_REPO = "phyter1/seed";

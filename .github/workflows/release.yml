@@ -44,6 +44,28 @@ jobs:
         working-directory: packages/memory
         run: bun install
 
+      - name: Install all sqlite-vec platform packages
+        # Bun's `bun install` only pulls the platform-specific sqlite-vec
+        # native extension for the host. For release artifacts we need all
+        # three (darwin-arm64, darwin-x64, linux-x64), so force-install the
+        # others so build-binaries.sh can copy them into dist/.
+        working-directory: packages/memory
+        shell: bash
+        run: |
+          VEC_VERSION=$(node -p "require('./node_modules/sqlite-vec/package.json').version")
+          for platform in darwin-arm64 darwin-x64 linux-x64; do
+            pkg="sqlite-vec-${platform}@${VEC_VERSION}"
+            target_dir="node_modules/sqlite-vec-${platform}"
+            if [ ! -d "$target_dir" ]; then
+              echo "installing $pkg"
+              npm pack "$pkg" --pack-destination /tmp/ --silent
+              mkdir -p "$target_dir"
+              tar -xzf /tmp/sqlite-vec-${platform}-${VEC_VERSION}.tgz -C "$target_dir" --strip-components=1
+            fi
+          done
+          echo "sqlite-vec native extensions ready:"
+          ls node_modules/sqlite-vec-*/vec0.*
+
       - name: Build fleet-control binaries
         working-directory: packages/fleet/control
         run: bash scripts/build-binaries.sh
