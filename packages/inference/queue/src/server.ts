@@ -68,7 +68,7 @@ export function createApp(db: QueueDB): Hono {
     }
 
     const job = db.claimJob(worker_id, capability);
-    if (!job) return c.json({ message: "no jobs available" }, 204);
+    if (!job) return c.body(null, 204);
     db.workerHeartbeat(worker_id);
     return c.json(job);
   });

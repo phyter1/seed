@@ -164,7 +164,17 @@ export interface PingMessage {
   type: "ping";
 }
 
-export type ControlMessage = CommandEnvelope | ConfigUpdateMessage | PingMessage;
+export interface ApprovedMessage {
+  type: "approved";
+  token: string;
+  machine_id: string;
+}
+
+export type ControlMessage =
+  | CommandEnvelope
+  | ConfigUpdateMessage
+  | PingMessage
+  | ApprovedMessage;
 
 // --- Config ---
 

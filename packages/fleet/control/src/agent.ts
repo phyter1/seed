@@ -178,29 +178,33 @@ function saveAgentToken(token: string, machineId: string, controlUrl: string): v
 
 // --- System Info ---
 
+async function readStream(stream: ReadableStream<Uint8Array>): Promise<string> {
+  return await new Response(stream).text();
+}
+
 async function getHostname(): Promise<string> {
   const proc = Bun.spawn(["hostname"], { stdout: "pipe" });
-  return (await proc.stdout.text()).trim();
+  return (await readStream(proc.stdout)).trim();
 }
 
 async function getArch(): Promise<string> {
   const proc = Bun.spawn(["uname", "-m"], { stdout: "pipe" });
-  return (await proc.stdout.text()).trim();
+  return (await readStream(proc.stdout)).trim();
 }
 
 async function getPlatform(): Promise<string> {
   const proc = Bun.spawn(["uname", "-s"], { stdout: "pipe" });
-  return (await proc.stdout.text()).trim().toLowerCase();
+  return (await readStream(proc.stdout)).trim().toLowerCase();
 }
 
 async function getCpuCores(): Promise<number> {
   const proc = Bun.spawn(["nproc"], { stdout: "pipe" });
-  const text = (await proc.stdout.text()).trim();
+  const text = (await readStream(proc.stdout)).trim();
   const n = parseInt(text, 10);
   // nproc may not exist on macOS
   if (isNaN(n)) {
     const proc2 = Bun.spawn(["sysctl", "-n", "hw.ncpu"], { stdout: "pipe" });
-    return parseInt((await proc2.stdout.text()).trim(), 10) || 1;
+    return parseInt((await readStream(proc2.stdout)).trim(), 10) || 1;
   }
   return n;
 }
@@ -209,7 +213,7 @@ async function getMemoryGB(): Promise<number> {
   try {
     // macOS
     const proc = Bun.spawn(["sysctl", "-n", "hw.memsize"], { stdout: "pipe" });
-    const bytes = parseInt((await proc.stdout.text()).trim(), 10);
+    const bytes = parseInt((await readStream(proc.stdout)).trim(), 10);
     if (!isNaN(bytes)) return Math.round((bytes / 1073741824) * 10) / 10;
   } catch {}
   try {
@@ -241,7 +245,7 @@ async function collectSystemMetrics(): Promise<{
         ["ps", "-A", "-o", "%cpu"],
         { stdout: "pipe" }
       );
-      const text = await proc.stdout.text();
+      const text = await readStream(proc.stdout);
       const lines = text.trim().split("\n").slice(1);
       cpuPercent = lines.reduce((sum, line) => sum + parseFloat(line.trim() || "0"), 0);
       cpuPercent = Math.min(100, Math.round(cpuPercent * 10) / 10);
@@ -253,7 +257,7 @@ async function collectSystemMetrics(): Promise<{
   try {
     if (process.platform === "darwin") {
       const proc = Bun.spawn(["vm_stat"], { stdout: "pipe" });
-      const text = await proc.stdout.text();
+      const text = await readStream(proc.stdout);
       const pageSize = 16384; // typical on M1
       const activeMatch = text.match(/Pages active:\s+(\d+)/);
       const wiredMatch = text.match(/Pages wired down:\s+(\d+)/);
@@ -270,7 +274,7 @@ async function collectSystemMetrics(): Promise<{
   let diskFreeGb = 0;
   try {
     const proc = Bun.spawn(["df", "-g", "/"], { stdout: "pipe" });
-    const text = await proc.stdout.text();
+    const text = await readStream(proc.stdout);
     const lines = text.trim().split("\n");
     if (lines.length > 1) {
       const parts = lines[1].trim().split(/\s+/);
@@ -467,7 +471,7 @@ function createCommandHandlers(): Map<string, CommandHandler> {
       if (action.startsWith("service.") && !params.service_id) {
         return { success: false, output: "service_id required" };
       }
-      if (action.startsWith("model.") && action !== "model.list" && !params.model_name && !params.load && !params.unload) {
+      if (action.startsWith("model.") && !params.model_name && !params.load && !params.unload) {
         return { success: false, output: "model params required" };
       }
       if (action === "repo.pull" && !params.repo_id) {

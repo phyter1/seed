@@ -107,7 +107,7 @@ const LOCALITY = resolvedConfig.locality;
 
 async function registerWorker(): Promise<void> {
   const hostname = (
-    await Bun.spawn(["hostname"], { stdout: "pipe" }).stdout.text()
+    await new Response(Bun.spawn(["hostname"], { stdout: "pipe" }).stdout).text()
   ).trim();
 
   // Retry registration — queue server may not be up yet at boot
@@ -120,6 +120,8 @@ async function registerWorker(): Promise<void> {
           id: WORKER_ID,
           capability: CAPABILITY,
           locality: LOCALITY,
+          provider_id: PROVIDER_ID ?? null,
+          default_model: DEFAULT_MODEL || null,
           hostname,
           endpoint: INFERENCE_URL,
           rate_limits: RATE_LIMITS,
