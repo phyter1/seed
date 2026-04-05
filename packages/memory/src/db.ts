@@ -387,6 +387,25 @@ export class MemoryDB {
 
   // --- Dedup / vector search ---
 
+  /**
+   * Find a memory with the given content_hash in the given project.
+   * Returns the earliest-inserted matching memory_id, or null if none.
+   * Cheap indexed lookup — callers with a caller-supplied hash can use
+   * this to short-circuit ingest before spending LLM + embedding cycles
+   * on byte-identical content. Only returns top-level memories (not
+   * chunk children) so re-ingesting a long doc matches the parent.
+   */
+  findByContentHash(hash: string, project: string = ""): number | null {
+    const row = this.db
+      .prepare(
+        `SELECT id FROM memories
+         WHERE content_hash = ? AND project = ? AND parent_id IS NULL
+         ORDER BY id ASC LIMIT 1`
+      )
+      .get(hash, project) as { id: number } | undefined;
+    return row?.id ?? null;
+  }
+
   checkDuplicate(
     embedding: number[],
     threshold: number
