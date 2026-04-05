@@ -528,6 +528,47 @@ type CommandHandler = (
   params: Record<string, unknown>
 ) => Promise<{ success: boolean; output: string }>;
 
+/**
+ * Locate the seed-cli binary on this machine, if installed.
+ *
+ * Checks canonical install paths. Returns the first executable match or
+ * null. We don't shell out to `which` because PATH in the agent's
+ * launchd context is narrow and unreliable for operator binaries.
+ */
+export function findCliPath(): string | null {
+  const fs = require("fs");
+  const home = process.env.HOME ?? "";
+  const candidates = [
+    `${home}/.local/bin/seed`,
+    `${home}/.local/bin/seed-cli`,
+    "/usr/local/bin/seed",
+    "/opt/homebrew/bin/seed",
+  ];
+  for (const p of candidates) {
+    try {
+      fs.accessSync(p, fs.constants.X_OK);
+      return p;
+    } catch {}
+  }
+  return null;
+}
+
+/**
+ * Read the version of a seed-cli binary by execing it with `version`.
+ * Returns null if the invocation fails or output is unparseable.
+ */
+export function getCliVersion(cliPath: string): string | null {
+  try {
+    const proc = Bun.spawnSync([cliPath, "version"]);
+    if (proc.exitCode !== 0) return null;
+    const out = new TextDecoder().decode(proc.stdout).trim();
+    const match = out.match(/\d+\.\d+\.\d+/);
+    return match ? match[0] : null;
+  } catch {
+    return null;
+  }
+}
+
 function createCommandHandlers(): Map<string, CommandHandler> {
   const handlers = new Map<string, CommandHandler>();
 
@@ -577,6 +618,40 @@ function createCommandHandlers(): Map<string, CommandHandler> {
     console.log("[agent] restart requested, exiting for supervisor to restart...");
     setTimeout(() => process.exit(0), 500);
     return { success: true, output: "restarting" };
+  });
+
+  handlers.set("cli.update", async (params) => {
+    const cliPath = findCliPath();
+    if (!cliPath) {
+      return {
+        success: true,
+        output: "no seed-cli found on this machine, skipping",
+      };
+    }
+    const currentVersion = getCliVersion(cliPath) ?? "unknown";
+    const version =
+      typeof params.version === "string" ? params.version : undefined;
+    const force = params.force === true;
+    try {
+      const result = await runSelfUpdate({
+        binary: "seed-cli",
+        version,
+        currentVersion,
+        force,
+        destPath: cliPath,
+      });
+      return {
+        success: true,
+        output: result.updated
+          ? `seed-cli updated ${result.fromVersion} -> ${result.toVersion} at ${cliPath}`
+          : `seed-cli already at ${result.toVersion}, no-op`,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        output: `cli self-update failed: ${err?.message ?? err}`,
+      };
+    }
   });
 
   handlers.set("agent.update", async (params) => {
@@ -1192,7 +1267,11 @@ async function entrypoint() {
   await runAgent();
 }
 
-entrypoint().catch((err) => {
-  console.error("[agent] fatal:", err);
-  process.exit(1);
-});
+// Only start the agent when this module is invoked directly, not when
+// imported by tests. Mirrors the pattern used in cli.ts.
+if (import.meta.main) {
+  entrypoint().catch((err) => {
+    console.error("[agent] fatal:", err);
+    process.exit(1);
+  });
+}

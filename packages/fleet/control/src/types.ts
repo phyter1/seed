@@ -407,6 +407,7 @@ export const ACTION_WHITELIST = [
   "repo.pull",
   "agent.update",
   "agent.restart",
+  "cli.update",
   "workload.install",
   "workload.reload",
   "workload.remove",
