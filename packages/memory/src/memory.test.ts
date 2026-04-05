@@ -97,6 +97,58 @@ describe("MemoryService.ingest", () => {
     expect(children.length).toBe(result.chunks!);
   });
 
+  test("threads provenance from ingest call to stored memory", async () => {
+    const { db, service } = makeService({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const result = await service.ingest("hello", "web", "docs", {
+      source_url: "https://example.com/page",
+      fetched_at: "2026-04-04T10:00:00.000Z",
+      refresh_policy: "weekly",
+      content_hash: "abc123",
+    });
+    expect(result.status).toBe("stored");
+    const mem = db.getMemory(result.memory_id!);
+    expect(mem!.source_url).toBe("https://example.com/page");
+    expect(mem!.fetched_at).toBe("2026-04-04T10:00:00.000Z");
+    expect(mem!.refresh_policy).toBe("weekly");
+    expect(mem!.content_hash).toBe("abc123");
+  });
+
+  test("chunk children inherit provenance from parent", async () => {
+    const longText = "paragraph one.\n\n" + "long body sentence. ".repeat(200);
+    const { db, service } = makeService({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const result = await service.ingest(longText, "doc", "p", {
+      source_url: "https://example.com/big",
+      refresh_policy: "monthly",
+    });
+    expect(result.status).toBe("stored");
+    expect(result.chunks).toBeGreaterThan(1);
+    const children = db.raw
+      .prepare("SELECT id FROM memories WHERE parent_id = ?")
+      .all(result.memory_id!) as Array<{ id: number }>;
+    expect(children.length).toBeGreaterThan(0);
+    for (const { id } of children) {
+      const child = db.getMemory(id)!;
+      expect(child.source_url).toBe("https://example.com/big");
+      expect(child.refresh_policy).toBe("monthly");
+    }
+  });
+
+  test("omitting provenance in ingest yields null fields", async () => {
+    const { db, service } = makeService({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const result = await service.ingest("authored text", "note", "p");
+    const mem = db.getMemory(result.memory_id!);
+    expect(mem!.source_url).toBeNull();
+    expect(mem!.fetched_at).toBeNull();
+    expect(mem!.refresh_policy).toBeNull();
+    expect(mem!.content_hash).toBeNull();
+  });
+
   test("recovers gracefully when LLM returns invalid JSON", async () => {
     const { db, service } = makeService({ raw: "not json at all" });
     const result = await service.ingest("hello world", "src", "p");
@@ -104,6 +156,18 @@ describe("MemoryService.ingest", () => {
     const mem = db.getMemory(result.memory_id!);
     expect(mem).not.toBeNull();
     expect(mem!.summary).toContain("not json");
+  });
+
+  test("provenance survives the LLM-fails-json fallback path", async () => {
+    const { db, service } = makeService({ raw: "not json at all" });
+    const result = await service.ingest("hello", "src", "p", {
+      source_url: "https://example.com/fallback",
+      refresh_policy: "daily",
+    });
+    expect(result.status).toBe("stored");
+    const mem = db.getMemory(result.memory_id!);
+    expect(mem!.source_url).toBe("https://example.com/fallback");
+    expect(mem!.refresh_policy).toBe("daily");
   });
 });
 

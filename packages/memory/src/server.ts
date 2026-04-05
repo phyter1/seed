@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { MemoryDB } from "./db";
 import { MemoryService } from "./memory";
+import { REFRESH_POLICIES, type ProvenanceInput, type RefreshPolicy } from "./types";
 
 export interface MemoryServerDeps {
   db: MemoryDB;
@@ -34,7 +35,7 @@ export function createMemoryApp(deps: MemoryServerDeps): Hono {
     return c.json({ question: q, answer });
   });
 
-  // POST /ingest {text, source?, project?}
+  // POST /ingest {text, source?, project?, source_url?, fetched_at?, refresh_policy?, content_hash?}
   app.post("/ingest", async (c) => {
     let data: any;
     try {
@@ -46,7 +47,24 @@ export function createMemoryApp(deps: MemoryServerDeps): Hono {
     if (!text) return c.json({ error: "missing 'text' field" }, 400);
     const source = typeof data.source === "string" ? data.source : "api";
     const project = typeof data.project === "string" ? data.project : "";
-    const result = await service.ingest(text, source, project);
+
+    const provenance: ProvenanceInput = {};
+    if (typeof data.source_url === "string") provenance.source_url = data.source_url;
+    if (typeof data.fetched_at === "string") provenance.fetched_at = data.fetched_at;
+    if (typeof data.content_hash === "string") provenance.content_hash = data.content_hash;
+    if (data.refresh_policy !== undefined) {
+      if (!REFRESH_POLICIES.includes(data.refresh_policy)) {
+        return c.json(
+          {
+            error: `invalid refresh_policy; expected one of: ${REFRESH_POLICIES.join(", ")}`,
+          },
+          400
+        );
+      }
+      provenance.refresh_policy = data.refresh_policy as RefreshPolicy;
+    }
+
+    const result = await service.ingest(text, source, project, provenance);
     return c.json({ status: "ingested", response: JSON.stringify(result) });
   });
 

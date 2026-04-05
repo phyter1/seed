@@ -457,12 +457,17 @@ export class MemoryDB {
     topics: string;
     importance: number;
     project: string;
+    source_url: string | null;
+    fetched_at: string | null;
+    refresh_policy: string | null;
+    content_hash: string | null;
   }> {
     if (!this.hasVec) return [];
     return this.db
       .prepare(
         `SELECT m.id, m.summary, m.raw_text, m.parent_id, m.source, m.entities,
-                m.topics, m.importance, m.project
+                m.topics, m.importance, m.project,
+                m.source_url, m.fetched_at, m.refresh_policy, m.content_hash
          FROM memories m
          LEFT JOIN vec_memories v ON m.id = v.memory_id
          WHERE v.memory_id IS NULL AND m.parent_id IS NULL`

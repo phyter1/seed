@@ -10,6 +10,26 @@ export type RefreshPolicy =
   | "monthly"
   | "on-demand";
 
+export const REFRESH_POLICIES: readonly RefreshPolicy[] = [
+  "static",
+  "daily",
+  "weekly",
+  "monthly",
+  "on-demand",
+] as const;
+
+/**
+ * Provenance attached to an ingest call. All fields optional — callers
+ * with authored content should omit this entirely; fetchers supplying
+ * external content should fill what they know.
+ */
+export interface ProvenanceInput {
+  source_url?: string | null;
+  fetched_at?: string | null;
+  refresh_policy?: RefreshPolicy | null;
+  content_hash?: string | null;
+}
+
 export interface Memory {
   id: number;
   source: string;
