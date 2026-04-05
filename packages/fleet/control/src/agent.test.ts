@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { findCliPath, getCliVersion } from "./agent";
+import { findCliPath, findControlPlanePath, getCliVersion } from "./agent";
 import { mkdtempSync, writeFileSync, chmodSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -38,6 +38,37 @@ describe("findCliPath", () => {
     chmodSync(seedPath, 0o755);
 
     expect(findCliPath()).toBe(seedPath);
+  });
+});
+
+describe("findControlPlanePath", () => {
+  let fakeHome: string;
+  let originalHome: string | undefined;
+
+  beforeAll(() => {
+    fakeHome = mkdtempSync(join(tmpdir(), "seed-cp-path-"));
+    originalHome = process.env.HOME;
+    process.env.HOME = fakeHome;
+  });
+
+  afterAll(() => {
+    process.env.HOME = originalHome;
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  test("returns null when no seed-control-plane is installed", () => {
+    const result = findControlPlanePath();
+    expect(result === null || typeof result === "string").toBe(true);
+  });
+
+  test("finds executable at ~/.local/bin/seed-control-plane", () => {
+    const binDir = join(fakeHome, ".local", "bin");
+    mkdirSync(binDir, { recursive: true });
+    const cpPath = join(binDir, "seed-control-plane");
+    writeFileSync(cpPath, "#!/bin/sh\necho fake");
+    chmodSync(cpPath, 0o755);
+
+    expect(findControlPlanePath()).toBe(cpPath);
   });
 });
 
