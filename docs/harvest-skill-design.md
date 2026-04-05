@@ -312,7 +312,71 @@ Candidates from the harvest beat enter the same Match → Propose pipeline as pe
 
 ---
 
-## Open Questions
+## Skill Retirement — Usage Tracking via Hook
 
-1. **Skill retirement.** Skills can become obsolete. Should the harvest pipeline also flag skills that haven't been invoked in N beats for potential deprecation?
-2. **Metrics.** Track extraction rate, jury agreement rate, proposal acceptance rate, and library growth over time. Useful for tuning thresholds.
+Skills can become obsolete. A skill extracted for a workflow that got replaced, or a tool integration that changed, shouldn't sit in the library forever unchallenged.
+
+**Tracking mechanism:** A `PostToolUse` hook on the `Skill` tool passively logs every skill invocation across all sessions — interactive and heartbeat, every machine.
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Skill",
+        "command": "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) $CLAUDE_TOOL_INPUT\" >> ~/.local/share/seed/skill-usage.log"
+      }
+    ]
+  }
+}
+```
+
+This hook ships in Seed's settings template so every installation gets it automatically.
+
+**Staleness detection:** The harvest beat reads `skill-usage.log`, cross-references against the skill index, and updates a `last_used` timestamp per skill. Any skill unreferenced for 30 days gets flagged in the index:
+
+```
+- deploy-verify: Verify Vercel deployment status after push [since: 2026-03-20]
+  ⚠ stale: last used 2026-03-04 (31 days ago)
+```
+
+No auto-deletion. Just surfaced for review. A stale skill might still be correct but unused — or it might be dead weight. A human decides.
+
+---
+
+## Metrics — Lightweight Pipeline Health
+
+The harvest beat appends a single line to `~/.local/share/seed/harvest-metrics.log` at the end of each daily run:
+
+```
+2026-04-05 | beats_reviewed: 24 | extracted: 3 | jury_agree: 2 | jury_split: 1 | merged: 1 | rejected: 1 | staged: 1 | active_skills: 37 | stale_skills: 0
+```
+
+One line per day. Human-readable. Greppable. No database, no dashboard.
+
+**Anomaly flags** (logged inline by the harvest beat when detected):
+
+| Condition | Flag |
+|---|---|
+| Extraction rejection rate < 70% | "Classifier may be too loose — extracted {n}/{total} beats" |
+| Jury split rate > 50% over 7 days | "Matching prompt may need tuning — jury split on {n}/{total} candidates" |
+| Library growth > 5 skills/week sustained | "Growth rate elevated — review recent merges for quality" |
+| No proposals in 30 days | "Pipeline may be too conservative, or work has been routine" |
+
+These are informational, not blocking. They surface in the harvest beat's journal entry so a human or future beat can investigate.
+
+---
+
+## All Decisions Summary
+
+| Question | Decision |
+|---|---|
+| Index location | Root-level `skill-index.md` |
+| Update diff format | Markdown description with before/after excerpts |
+| Cross-beat detection | Dedicated harvest beat tier, daily, two-stage local compression |
+| Approval authority | Jury consensus auto-merges; jury split → human review |
+| Rejection memory | Unified index tracks rejected candidates with rationale + attempt count |
+| Persistence escalation | 3+ attempts → shifted jury prompt; 5+ → always flag human |
+| Skill retirement | PostToolUse hook tracks usage; 30-day stale threshold |
+| Metrics | Single-line daily log + inline anomaly flags |
+| Cost | $0 — entire pipeline runs on local fleet models |
