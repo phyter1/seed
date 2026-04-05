@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Pre-push hook: scan commits being pushed for secrets.
+#
+# The commit boundary (pre-commit) is a suggestion; the push boundary is where
+# code leaves the machine. Scan here authoritatively — fail the push if
+# gitleaks finds anything, and fail-hard if gitleaks isn't installed at all.
+#
+# Stdin format (per githooks(5)):
+#   <local_ref> <local_sha> <remote_ref> <remote_sha>
+#
+# To bypass when you are genuinely certain: git push --no-verify
+set -e
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "error: gitleaks not installed — refusing to push unscanned commits." >&2
+  echo "  install: brew install gitleaks  (or: bash setup/install-deps.sh)" >&2
+  exit 1
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+ZERO="0000000000000000000000000000000000000000"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  # Branch deletion — nothing to scan.
+  if [ "$local_sha" = "$ZERO" ]; then
+    continue
+  fi
+
+  if [ "$remote_sha" = "$ZERO" ]; then
+    # New branch — scan commits not yet on any remote branch. Avoids
+    # re-scanning all of git history on first push of a feature branch.
+    range="$local_sha --not --remotes=origin"
+  else
+    range="$remote_sha..$local_sha"
+  fi
+
+  if ! gitleaks git \
+    --log-opts="$range" \
+    --no-banner \
+    --config "$REPO_ROOT/.gitleaks.toml"; then
+    echo "" >&2
+    echo "pre-push: gitleaks found potential secrets in commits being pushed." >&2
+    echo "  review the findings above, fix them, then try again." >&2
+    echo "  bypass (only if you're certain): git push --no-verify" >&2
+    exit 1
+  fi
+done
+
+exit 0

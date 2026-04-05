@@ -1,8 +1,17 @@
-# Gitleaks config for Seed
-# Allowlist template/example tokens that are intentionally in the repo
+# Gitleaks config for Seed.
+#
+# Extends the gitleaks default ruleset — without [extend].useDefault the
+# custom config *replaces* defaults entirely (silently), which is how
+# the previous version of this file was shipping a no-op scanner.
+
+[extend]
+useDefault = true
 
 [allowlist]
-  description = "Template example tokens"
+  description = "Template example tokens and deliberate fake-secret test fixtures"
   paths = [
-    '''.claude/templates/documents/API-DESIGN\.md'''
+    '''.claude/templates/documents/API-DESIGN\.md''',
+    # Sensitivity profile tests contain deliberate fake credentials to
+    # verify the classifier detects them. These are not real secrets.
+    '''packages/inference/sensitivity/src/.*\.test\.ts'''
   ]
