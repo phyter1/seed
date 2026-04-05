@@ -104,8 +104,8 @@ describe("normalizer: log records", () => {
       {
         body: { stringValue: "inference_request" },
         attributes: [
-          { key: "tokens_prompt", value: { intValue: "120" } },
-          { key: "tokens_completion", value: { intValue: "80" } },
+          { key: "tokens_input", value: { intValue: "120" } },
+          { key: "tokens_output", value: { intValue: "80" } },
           { key: "cost_cents", value: { intValue: "0" } },
           { key: "model", value: { stringValue: "qwen3-coder" } },
         ],

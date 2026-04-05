@@ -26,8 +26,8 @@ export interface InferenceEventAttributes {
   provider: Provider;
   route_type: RouteType;
   route_pattern: string;
-  tokens_prompt: number;
-  tokens_completion: number;
+  tokens_input: number;
+  tokens_output: number;
   duration_ms: number;
   status: EventStatus;
   thinking_mode: boolean;
@@ -121,8 +121,8 @@ export interface BuildInferenceEventInput {
   provider: Provider;
   route_type: RouteType;
   route_pattern: string;
-  tokens_prompt: number;
-  tokens_completion: number;
+  tokens_input: number;
+  tokens_output: number;
   duration_ms: number;
   status: EventStatus;
   thinking_mode: boolean;

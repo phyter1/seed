@@ -89,8 +89,8 @@ describe("buildInferenceEvent", () => {
       provider: "ollama",
       route_type: "keyword",
       route_pattern: "code",
-      tokens_prompt: 42,
-      tokens_completion: 128,
+      tokens_input: 42,
+      tokens_output: 128,
       duration_ms: 3100,
       status: "success",
       thinking_mode: false,
@@ -107,8 +107,8 @@ describe("buildInferenceEvent", () => {
     expect(evt.attributes.provider).toBe("ollama");
     expect(evt.attributes.route_type).toBe("keyword");
     expect(evt.attributes.route_pattern).toBe("code");
-    expect(evt.attributes.tokens_prompt).toBe(42);
-    expect(evt.attributes.tokens_completion).toBe(128);
+    expect(evt.attributes.tokens_input).toBe(42);
+    expect(evt.attributes.tokens_output).toBe(128);
     expect(evt.attributes.duration_ms).toBe(3100);
     expect(evt.attributes.status).toBe("success");
     expect(evt.attributes.thinking_mode).toBe(false);
@@ -123,8 +123,8 @@ describe("buildInferenceEvent", () => {
       provider: "ollama",
       route_type: "jury",
       route_pattern: "juror",
-      tokens_prompt: 10,
-      tokens_completion: 20,
+      tokens_input: 10,
+      tokens_output: 20,
       duration_ms: 500,
       status: "success",
       thinking_mode: false,
@@ -140,8 +140,8 @@ describe("buildInferenceEvent", () => {
       provider: "mlx",
       route_type: "jury",
       route_pattern: "juror",
-      tokens_prompt: 0,
-      tokens_completion: 0,
+      tokens_input: 0,
+      tokens_output: 0,
       duration_ms: 0,
       status: "error",
       thinking_mode: false,
@@ -172,8 +172,8 @@ describe("createTelemetryEmitter", () => {
     provider: "ollama",
     route_type: "keyword",
     route_pattern: "default",
-    tokens_prompt: 1,
-    tokens_completion: 1,
+    tokens_input: 1,
+    tokens_output: 1,
     duration_ms: 1,
     status: "success",
     thinking_mode: false,
