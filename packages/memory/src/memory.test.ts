@@ -739,3 +739,110 @@ describe("MemoryDB.findByContentHash", () => {
     expect(db.findByContentHash("h")).toBe(id);
   });
 });
+
+describe("MemoryDB.backfillOrigin", () => {
+  let db: MemoryDB;
+  beforeEach(() => {
+    db = new MemoryDB(":memory:");
+  });
+
+  test("sets origin on rows where origin IS NULL", () => {
+    // Write legacy-shaped rows (no origin)
+    const a = db.storeMemory({
+      raw_text: "x",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+    });
+    const b = db.storeMemory({
+      raw_text: "y",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+    });
+    const result = db.backfillOrigin({ origin: "internal" });
+    expect(result.updated).toBe(2);
+    expect(db.getMemory(a)!.origin).toBe("internal");
+    expect(db.getMemory(b)!.origin).toBe("internal");
+  });
+
+  test("leaves rows with an existing origin alone", () => {
+    const legacy = db.storeMemory({
+      raw_text: "x",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+    });
+    const already = db.storeMemory({
+      raw_text: "y",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      origin: "external",
+      source_url: "https://example.com",
+      fetched_at: "2026-04-05T00:00:00.000Z",
+    });
+    const result = db.backfillOrigin({ origin: "internal" });
+    expect(result.updated).toBe(1);
+    expect(db.getMemory(legacy)!.origin).toBe("internal");
+    expect(db.getMemory(already)!.origin).toBe("external"); // untouched
+  });
+
+  test("is idempotent — second run updates nothing", () => {
+    db.storeMemory({
+      raw_text: "x",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+    });
+    const first = db.backfillOrigin({ origin: "internal" });
+    const second = db.backfillOrigin({ origin: "internal" });
+    expect(first.updated).toBe(1);
+    expect(second.updated).toBe(0);
+  });
+
+  test("default_source fills empty/null source but preserves existing", () => {
+    const emptySrc = db.storeMemory({
+      raw_text: "x",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      source: "",
+    });
+    const hasSrc = db.storeMemory({
+      raw_text: "y",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      source: "heartbeat",
+    });
+    db.backfillOrigin({ origin: "internal", default_source: "journal" });
+    expect(db.getMemory(emptySrc)!.source).toBe("journal");
+    expect(db.getMemory(hasSrc)!.source).toBe("heartbeat");
+  });
+
+  test("default_source leaves source untouched when not provided", () => {
+    const id = db.storeMemory({
+      raw_text: "x",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      source: "",
+    });
+    db.backfillOrigin({ origin: "internal" });
+    expect(db.getMemory(id)!.source).toBe("");
+  });
+
+  test("returns 0 when no NULL-origin rows exist", () => {
+    const result = db.backfillOrigin({ origin: "internal" });
+    expect(result.updated).toBe(0);
+  });
+});

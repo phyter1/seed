@@ -149,6 +149,31 @@ export function createMemoryApp(deps: MemoryServerDeps): Hono {
     return c.json({ status: "done", backfilled: count });
   });
 
+  // POST /backfill-origin {origin, default_source?}
+  // Idempotent one-shot migration for rows written before memory@0.4.0.
+  app.post("/backfill-origin", async (c) => {
+    let data: any;
+    try {
+      data = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON" }, 400);
+    }
+    if (!ORIGINS.includes(data?.origin)) {
+      return c.json(
+        { error: `missing or invalid 'origin'; expected one of: ${ORIGINS.join(", ")}` },
+        400
+      );
+    }
+    const params: { origin: Origin; default_source?: string } = {
+      origin: data.origin as Origin,
+    };
+    if (typeof data.default_source === "string") {
+      params.default_source = data.default_source;
+    }
+    const result = db.backfillOrigin(params);
+    return c.json({ status: "done", updated: result.updated });
+  });
+
   // GET /graph?entity=&project=
   app.get("/graph", (c) => {
     const entity = (c.req.query("entity") ?? "").trim();
