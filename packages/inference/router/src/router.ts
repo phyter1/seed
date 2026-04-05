@@ -11,6 +11,7 @@
  */
 
 import { spawnSync, spawn } from "node:child_process";
+import net from "node:net";
 import { loadRouterConfig, type LoadedRouterConfig } from "./config";
 import { MlxSupervisor } from "./mlx-supervisor";
 import type { ModelEntry, ChatMessage, ChatResponse, RoutingResult, JurorResult, JuryResult } from "./types";
@@ -115,6 +116,54 @@ function killMlxServers(): void {
   mlxState.pid = null;
 }
 
+/**
+ * TCP connect-probe: resolves (with ms waited) once the MLX port refuses
+ * connections, or rejects on timeout. Addresses issue #38 — the dying MLX
+ * child can hold :8080 briefly after pkill returns, racing the replacement
+ * child's bind() and producing EADDRINUSE log noise.
+ */
+function waitMlxPortFree(timeoutMs = 5000, intervalMs = 100): Promise<number> {
+  const [hostPart, portPart] = MLX_HOST.split(":");
+  const host = hostPart || "127.0.0.1";
+  const port = Number.parseInt(portPart ?? "8080", 10);
+  const start = Date.now();
+
+  return new Promise((resolve, reject) => {
+    const attempt = () => {
+      const socket = net.connect({ host, port });
+      let settled = false;
+      const cleanup = () => { settled = true; socket.removeAllListeners(); socket.destroy(); };
+
+      socket.setTimeout(200);
+      socket.once("connect", () => {
+        if (settled) return;
+        cleanup();
+        // Port still bound. Retry or give up.
+        if (Date.now() - start >= timeoutMs) {
+          reject(new Error(`port ${port} still bound after ${timeoutMs}ms`));
+          return;
+        }
+        setTimeout(attempt, intervalMs);
+      });
+      socket.once("error", () => {
+        if (settled) return;
+        cleanup();
+        resolve(Date.now() - start); // ECONNREFUSED — port free
+      });
+      socket.once("timeout", () => {
+        if (settled) return;
+        cleanup();
+        if (Date.now() - start >= timeoutMs) {
+          reject(new Error(`port ${port} probe timeout after ${timeoutMs}ms`));
+          return;
+        }
+        setTimeout(attempt, intervalMs);
+      });
+    };
+    attempt();
+  });
+}
+
 const mlxSupervisor = new MlxSupervisor({
   spawn: (thinking: boolean) => {
     const args = [
@@ -132,6 +181,7 @@ const mlxSupervisor = new MlxSupervisor({
     return proc;
   },
   log: (m) => console.log(`[mlx-sup] ${m}`),
+  waitPortFree: () => waitMlxPortFree(),
 });
 
 async function startMlxServer(thinking: boolean): Promise<void> {
