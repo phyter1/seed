@@ -311,3 +311,65 @@ Relevant code:
 - `packages/fleet/control/src/workload-installer.ts:640-641` — install pipeline calls `driver.unload` then `driver.load`, so a transitional bootout state might be what makes `list` miss the entry while `print` still shows it.
 
 Recommendation in the issue: probe `launchctl print gui/<uid>/<label>` before calling bootstrap, or widen the idempotency check beyond `list`. **No code change made** — diagnosis only, per task scope.
+
+---
+
+## Follow-up 2026-04-05 — MLX runtime migration: mlx-lm → mlx-vlm
+
+**PR:** phyter1/seed#44 — `feat(router): migrate MLX runtime from mlx-lm to mlx-vlm (1.2.0)` — open, CI green, not merged
+**CI run:** https://github.com/phyter1/seed/actions/runs/24008293993 — ✅ all three jobs pass (fleet/control 13s, memory 10s, inference/router 8s)
+**Source note:** `existential/notes/inbox/mlx-runtime-migration-2026-04-05.md` (Ryan's benchmarks + field-name diffs)
+
+### Thinking-mode mechanism
+`mlx_vlm.server` has no `--no-thinking` / `--chat-template-args` CLI flag — thinking-mode is a **per-request** field in the chat completions body. Verified via `--help` on ren3 and by reading the installed package at `/opt/homebrew/lib/python3.11/site-packages/mlx_vlm/server.py:340+`. The Pydantic model defaults it to `False` via `kwargs.setdefault("enable_thinking", False)` (server.py:364), which is the correct default for Qwen3.5-9B.
+
+The router now sends `enable_thinking: <needsThinking>` in each MLX request body, derived from `routeRequest()`'s `needsThinking` flag. The old restart-to-toggle lifecycle (`ensureMlxThinking`, `withMlxLock`, `mlxState.restarting`, the `--thinking`/`--no-thinking` CLI flags on `start-mlx-server.py`) is removed. `ensureMlxAlive()` replaces it — a single liveness probe that spawns MLX via the supervisor only when `/v1/models` is unreachable.
+
+### Telemetry field rename — scope decision reversed mid-flight
+The migration brief said to rename the router's telemetry attribute keys from `tokens_prompt`/`tokens_completion` → `tokens_input`/`tokens_output` (matching mlx-vlm's wire names) and bump to 1.2.0 as a breaking change. While implementing, I grepped for the downstream consumer and found `packages/fleet/control/src/normalizer.ts:251-252` reading `tokens_prompt`/`tokens_completion` literally, plus matching tests in `packages/fleet/control/src/{server-,}telemetry.test.ts`.
+
+Renaming the outbound wire format would silently regress all router-originated token counts to 0 in the control plane until the normalizer is updated too — a cross-package change that the brief explicitly scoped out ("Do not touch anything outside packages/inference/router/"). These two instructions conflicted.
+
+**Resolution:** Migrated the router's **internal** `ChatResponse.usage` shape to mlx-vlm's canonical names (`input_tokens`/`output_tokens`, plus the new `prompt_tps`/`generation_tps`/`peak_memory` fields), kept the **outbound** OTLP attribute keys stable as `tokens_prompt`/`tokens_completion`, and placed the adapter at the telemetry-emit call sites:
+
+```ts
+tokens_prompt: response.usage?.input_tokens ?? 0,
+tokens_completion: response.usage?.output_tokens ?? 0,
+```
+
+The Ollama response adapter was also updated so both backends produce the same internal usage shape. A follow-up PR should rename the OTLP wire keys atomically across router + control-plane + their tests.
+
+### Deploy evidence (ren3)
+- Pre-deploy: verified `torch 2.11.0`, `torchvision 0.26.0`, `mlx-vlm 0.4.4` installed on ren3.
+- Tarball: `fleet-router-1.2.0-darwin-arm64.tar.gz` (21.3 MB) scp'd to `~/.local/share/seed/workload-artifacts/`.
+- CP declaration: `PUT /v1/workloads/ren3` → `config_version: 7, pushed: true`.
+- Install command: `POST /v1/workloads/ren3/fleet-router/install` → `command_id: 1f67903b-..., status: dispatched`.
+- Symlink flipped: `~/.local/share/seed/workloads/fleet-router-current -> fleet-router-1.2.0`.
+- Router boot banner visible in `~/Library/Logs/com.seed.fleet-router.log`: `Fleet Router v1.2 (rule-based + mlx-vlm)`, `Runtime: mlx-vlm`, `Thinking: per-request (enable_thinking flag)`, `[router] ready.`
+
+### Live-verification evidence
+`/health` on ren3:3000:
+```json
+{
+  "status": "ok", "router": "rule-based-v1.2", "runtime": "mlx-vlm",
+  "mlx": { "thinking": false,
+           "supervisor": { "isHealthy": true, "respawnCount": 0, "consecutiveFailures": 0,
+                           "givenUp": false, "lastPortWaitMs": null } }
+}
+```
+- **Qwen3.5-9B** (via router :3000): `47 * 53` → `2491` (5 output tokens, 24.3 gen_tps). `grep -c "<think>"` on a proof-style 500-token response returned `0` — thinking-mode is OFF.
+- **gemma-4-e2b** (via ren3:8080): `Hi! How can I help you today? 😊` (11 tokens, 51.6 gen_tps).
+- **gemma-4-e4b** (via ren3:8080): `Hello! How can I help you today?` (10 tokens, 44.8 gen_tps).
+- All three responses carried the mlx-vlm usage shape: `input_tokens`, `output_tokens`, `prompt_tps`, `generation_tps`, `peak_memory`.
+
+Router's `/v1/models` on the MLX backend reports all three models cached: `Qwen3.5-9B-MLX-4bit`, `gemma-4-e2b-it-4bit`, `gemma-4-e4b-it-4bit` — confirming the "one process, all models" claim from the migration note.
+
+### Cleanup evidence (ren3)
+- Killed stale `mlx_lm.server` (pid 1125) — an orphaned child of the dead v1.1.1 router. The new v1.2.0 router's startup probe had found :8080 reachable and skipped spawning, so the old runtime was silently kept alive until I killed it.
+- Killed Ryan's test `mlx_vlm.server` on :8081 (pid 1439).
+- Post-cleanup: only `start-mlx-server.py` (v1.2.0) → `mlx_vlm.server` on :8080 remains. No leftover mlx-lm processes.
+
+### Surprises
+- **The router upgrade alone doesn't swap the MLX runtime.** When v1.1.1's router died, its detached MLX child (mlx-lm, pid 1125) survived. v1.2.0's router came up, probed :8080 via `waitForMlxReady()`, got a 200, logged `[router] ready.`, and happily proxied requests to the *old* mlx-lm server. Clients saw mlx-lm's `prompt_tokens`/`completion_tokens` usage shape even after the router was on 1.2.0. Fix: killed the stale child to force the new router to spawn mlx-vlm via its own supervisor. **An installer that stops/kills detached MLX children on upgrade (or a preinstall hook in the router manifest) would avoid this class of "zombie runtime" after a runtime-swapping version bump.**
+- **The telemetry OTLP wire-format is a cross-package contract.** The brief treated the rename as router-local. Keeping it internal was the right call here, but the broader telemetry schema (token counts, event types, attribute conventions) could use a single-source-of-truth module that both router and normalizer import.
+
