@@ -13,6 +13,7 @@ import { storeTriples } from "./graph";
 import type {
   IngestResult,
   Memory,
+  Origin,
   ProvenanceInput,
   RefreshPolicy,
   ScoredMemory,
@@ -471,6 +472,7 @@ export class MemoryService {
             fetched_at: row.fetched_at,
             refresh_policy: row.refresh_policy as RefreshPolicy | null,
             content_hash: row.content_hash,
+            origin: row.origin as Origin | null,
           });
           count++;
         }

@@ -22,6 +22,7 @@ import type {
   Entity,
   EntityGraph,
   MemoryStats,
+  Origin,
   RefreshPolicy,
 } from "./types";
 
@@ -174,6 +175,14 @@ export class MemoryDB {
     if (!memoriesCols.has("content_hash")) {
       this.db.exec("ALTER TABLE memories ADD COLUMN content_hash TEXT DEFAULT NULL");
     }
+    // Origin column — added in memory@0.4.0. Nullable; existing rows stay
+    // null until backfilled. Enforcement (origin='external' requires
+    // source_url + fetched_at) lives in the service/server layer, not
+    // the DB, so callers can still store legacy rows directly for
+    // backfill migrations.
+    if (!memoriesCols.has("origin")) {
+      this.db.exec("ALTER TABLE memories ADD COLUMN origin TEXT DEFAULT NULL");
+    }
 
     if (this.hasVec) {
       this.ensureVecTable();
@@ -262,6 +271,7 @@ export class MemoryDB {
       fetched_at: row.fetched_at ?? null,
       refresh_policy: (row.refresh_policy ?? null) as RefreshPolicy | null,
       content_hash: row.content_hash ?? null,
+      origin: (row.origin ?? null) as Origin | null,
     };
   }
 
@@ -279,13 +289,14 @@ export class MemoryDB {
     fetched_at?: string | null;
     refresh_policy?: RefreshPolicy | null;
     content_hash?: string | null;
+    origin?: Origin | null;
   }): number {
     const now = new Date().toISOString();
     const tx = this.db.transaction(() => {
       this.db
         .prepare(
-          `INSERT INTO memories (source, raw_text, summary, entities, topics, importance, created_at, project, parent_id, source_url, fetched_at, refresh_policy, content_hash)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO memories (source, raw_text, summary, entities, topics, importance, created_at, project, parent_id, source_url, fetched_at, refresh_policy, content_hash, origin)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           params.source ?? "",
@@ -300,7 +311,8 @@ export class MemoryDB {
           params.source_url ?? null,
           params.fetched_at ?? null,
           params.refresh_policy ?? null,
-          params.content_hash ?? null
+          params.content_hash ?? null,
+          params.origin ?? null
         );
       const row = this.db.prepare("SELECT last_insert_rowid() as id").get() as { id: number };
       const mid = row.id;
@@ -461,13 +473,14 @@ export class MemoryDB {
     fetched_at: string | null;
     refresh_policy: string | null;
     content_hash: string | null;
+    origin: string | null;
   }> {
     if (!this.hasVec) return [];
     return this.db
       .prepare(
         `SELECT m.id, m.summary, m.raw_text, m.parent_id, m.source, m.entities,
                 m.topics, m.importance, m.project,
-                m.source_url, m.fetched_at, m.refresh_policy, m.content_hash
+                m.source_url, m.fetched_at, m.refresh_policy, m.content_hash, m.origin
          FROM memories m
          LEFT JOIN vec_memories v ON m.id = v.memory_id
          WHERE v.memory_id IS NULL AND m.parent_id IS NULL`

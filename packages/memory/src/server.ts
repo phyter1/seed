@@ -1,7 +1,13 @@
 import { Hono } from "hono";
 import { MemoryDB } from "./db";
 import { MemoryService } from "./memory";
-import { REFRESH_POLICIES, type ProvenanceInput, type RefreshPolicy } from "./types";
+import {
+  ORIGINS,
+  REFRESH_POLICIES,
+  type Origin,
+  type ProvenanceInput,
+  type RefreshPolicy,
+} from "./types";
 
 export interface MemoryServerDeps {
   db: MemoryDB;
@@ -35,7 +41,7 @@ export function createMemoryApp(deps: MemoryServerDeps): Hono {
     return c.json({ question: q, answer });
   });
 
-  // POST /ingest {text, source?, project?, source_url?, fetched_at?, refresh_policy?, content_hash?}
+  // POST /ingest {text, source?, project?, source_url?, fetched_at?, refresh_policy?, content_hash?, origin?}
   app.post("/ingest", async (c) => {
     let data: any;
     try {
@@ -62,6 +68,31 @@ export function createMemoryApp(deps: MemoryServerDeps): Hono {
         );
       }
       provenance.refresh_policy = data.refresh_policy as RefreshPolicy;
+    }
+    if (data.origin !== undefined) {
+      if (!ORIGINS.includes(data.origin)) {
+        return c.json(
+          { error: `invalid origin; expected one of: ${ORIGINS.join(", ")}` },
+          400
+        );
+      }
+      provenance.origin = data.origin as Origin;
+    }
+
+    // Enforcement: external content must declare where it came from and when.
+    // Null origin (back-compat) and internal origin both skip this check.
+    if (provenance.origin === "external") {
+      const missing: string[] = [];
+      if (!provenance.source_url) missing.push("source_url");
+      if (!provenance.fetched_at) missing.push("fetched_at");
+      if (missing.length > 0) {
+        return c.json(
+          {
+            error: `origin='external' requires: ${missing.join(", ")}`,
+          },
+          400
+        );
+      }
     }
 
     const result = await service.ingest(text, source, project, provenance);

@@ -128,6 +128,134 @@ describe("memory HTTP API", () => {
     }
   });
 
+  test("POST /ingest stores origin='internal'", async () => {
+    const { app, db } = makeApp({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const res = await app.request("/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "journal entry", origin: "internal" }),
+    });
+    expect(res.status).toBe(200);
+    expect(db.getMemory(1)!.origin).toBe("internal");
+  });
+
+  test("POST /ingest 400 on invalid origin", async () => {
+    const { app } = makeApp({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const res = await app.request("/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "hi", origin: "third-party" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as any;
+    expect(body.error).toContain("origin");
+  });
+
+  test("POST /ingest rejects origin='external' without source_url", async () => {
+    const { app } = makeApp({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const res = await app.request("/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: "web content",
+        origin: "external",
+        fetched_at: "2026-04-05T00:00:00.000Z",
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as any;
+    expect(body.error).toContain("source_url");
+  });
+
+  test("POST /ingest rejects origin='external' without fetched_at", async () => {
+    const { app } = makeApp({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const res = await app.request("/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: "web content",
+        origin: "external",
+        source_url: "https://example.com",
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as any;
+    expect(body.error).toContain("fetched_at");
+  });
+
+  test("POST /ingest rejects origin='external' with neither provenance field (both listed)", async () => {
+    const { app } = makeApp({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const res = await app.request("/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "web content", origin: "external" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as any;
+    expect(body.error).toContain("source_url");
+    expect(body.error).toContain("fetched_at");
+  });
+
+  test("POST /ingest accepts origin='external' with both source_url and fetched_at", async () => {
+    const { app, db } = makeApp({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const res = await app.request("/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: "web content",
+        origin: "external",
+        source_url: "https://example.com/doc",
+        fetched_at: "2026-04-05T00:00:00.000Z",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const mem = db.getMemory(1)!;
+    expect(mem.origin).toBe("external");
+    expect(mem.source_url).toBe("https://example.com/doc");
+    expect(mem.fetched_at).toBe("2026-04-05T00:00:00.000Z");
+  });
+
+  test("POST /ingest does NOT enforce provenance when origin is omitted", async () => {
+    // Back-compat: null origin skips enforcement entirely.
+    const { app, db } = makeApp({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const res = await app.request("/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "some content" }),
+    });
+    expect(res.status).toBe(200);
+    expect(db.getMemory(1)!.origin).toBeNull();
+  });
+
+  test("POST /ingest does NOT enforce provenance when origin='internal'", async () => {
+    const { app, db } = makeApp({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const res = await app.request("/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "authored", origin: "internal" }),
+    });
+    expect(res.status).toBe(200);
+    const mem = db.getMemory(1)!;
+    expect(mem.origin).toBe("internal");
+    expect(mem.source_url).toBeNull();
+  });
+
   test("GET /query returns answer", async () => {
     const { app } = makeApp({
       ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },

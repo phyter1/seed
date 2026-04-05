@@ -137,6 +137,28 @@ describe("MemoryService.ingest", () => {
     }
   });
 
+  test("origin threads through ingest and is inherited by chunk children", async () => {
+    const longText = "para.\n\n" + "body sentence. ".repeat(200);
+    const { db, service } = makeService({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const result = await service.ingest(longText, "doc", "p", {
+      origin: "external",
+      source_url: "https://example.com/doc",
+      fetched_at: "2026-04-05T00:00:00.000Z",
+    });
+    expect(result.status).toBe("stored");
+    expect(result.chunks).toBeGreaterThan(1);
+    const parent = db.getMemory(result.memory_id!)!;
+    expect(parent.origin).toBe("external");
+    const children = db.raw
+      .prepare("SELECT id FROM memories WHERE parent_id = ?")
+      .all(result.memory_id!) as Array<{ id: number }>;
+    for (const { id } of children) {
+      expect(db.getMemory(id)!.origin).toBe("external");
+    }
+  });
+
   test("omitting provenance in ingest yields null fields", async () => {
     const { db, service } = makeService({
       ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
@@ -463,5 +485,79 @@ describe("MemoryDB provenance columns", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("MemoryDB origin column", () => {
+  let db: MemoryDB;
+  beforeEach(() => {
+    db = new MemoryDB(":memory:");
+  });
+
+  test("schema includes origin column", () => {
+    const cols = new Set<string>(
+      (db.raw.prepare("PRAGMA table_info(memories)").all() as any[]).map(
+        (r) => r.name
+      )
+    );
+    expect(cols.has("origin")).toBe(true);
+  });
+
+  test("round-trips origin='internal'", () => {
+    const id = db.storeMemory({
+      raw_text: "authored",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      origin: "internal",
+    });
+    const mem = db.getMemory(id)!;
+    expect(mem.origin).toBe("internal");
+  });
+
+  test("round-trips origin='external'", () => {
+    const id = db.storeMemory({
+      raw_text: "fetched",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      origin: "external",
+      source_url: "https://example.com",
+      fetched_at: "2026-04-05T00:00:00.000Z",
+    });
+    const mem = db.getMemory(id)!;
+    expect(mem.origin).toBe("external");
+    expect(mem.source_url).toBe("https://example.com");
+  });
+
+  test("omitting origin yields null (backwards compat)", () => {
+    const id = db.storeMemory({
+      raw_text: "legacy",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+    });
+    const mem = db.getMemory(id)!;
+    expect(mem.origin).toBeNull();
+  });
+
+  test("db layer does NOT enforce external requires provenance", () => {
+    // Enforcement lives in the service/server layer so backfill scripts
+    // can write legacy rows directly. storeMemory accepts origin='external'
+    // without source_url/fetched_at.
+    const id = db.storeMemory({
+      raw_text: "x",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      origin: "external",
+    });
+    const mem = db.getMemory(id)!;
+    expect(mem.origin).toBe("external");
+    expect(mem.source_url).toBeNull();
   });
 });

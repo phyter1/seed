@@ -19,6 +19,18 @@ export const REFRESH_POLICIES: readonly RefreshPolicy[] = [
 ] as const;
 
 /**
+ * Where a memory came from. 'internal' = authored by this system (journal
+ * entries, reflections, generated summaries). 'external' = fetched from
+ * somewhere with a URL (web content, APIs, documents). Enforcement kicks
+ * in when origin='external': the caller must also supply source_url and
+ * fetched_at. Null is allowed for back-compat with rows written before
+ * this column existed.
+ */
+export type Origin = "internal" | "external";
+
+export const ORIGINS: readonly Origin[] = ["internal", "external"] as const;
+
+/**
  * Provenance attached to an ingest call. All fields optional — callers
  * with authored content should omit this entirely; fetchers supplying
  * external content should fill what they know.
@@ -28,6 +40,7 @@ export interface ProvenanceInput {
   fetched_at?: string | null;
   refresh_policy?: RefreshPolicy | null;
   content_hash?: string | null;
+  origin?: Origin | null;
 }
 
 export interface Memory {
@@ -53,6 +66,11 @@ export interface Memory {
   refresh_policy: RefreshPolicy | null;
   /** SHA-256 hex digest of raw_text. Used for exact-dup detection. */
   content_hash: string | null;
+  /**
+   * Whether this memory was authored locally ('internal') or fetched from
+   * an external source ('external'). Null for rows predating this column.
+   */
+  origin: Origin | null;
 }
 
 export interface Entity {
