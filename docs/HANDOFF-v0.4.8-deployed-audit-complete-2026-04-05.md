@@ -288,3 +288,26 @@ Post-recovery `/health`: `{pid:1125, respawnCount:1, consecutiveFailures:0, isHe
 - **Orphaned MLX children from the previous 1.1.0 install.** Pre-deploy, ren3 had 4 MLX processes from the 1.1.0 workload dir, all attempting port 8080 — direct evidence of the EADDRINUSE race this PR fixes. Killed them before deploying 1.1.1; post-deploy the new MLX starts cleanly.
 - **CI doesn't cover the router package yet.** The EPIC-010 matrix is `packages/fleet/control` + `packages/memory` only. Router unit + E2E tests passed locally but aren't gating this PR. Candidate to add `packages/inference/router` to the matrix.
 
+---
+
+## Follow-up 2026-04-05 — PR #41 gaps closed
+
+### CI matrix extended to router
+**PR:** phyter1/seed#42 — `ci: add router package to test matrix` — open, awaiting review
+**CI run:** https://github.com/phyter1/seed/actions/runs/24007606371 — ✅ all three jobs green (fleet/control, memory, inference/router)
+
+Surprise en route: transitive `file:` deps don't resolve on a cold CI runner. `packages/inference/router` depends on `@seed/jury` via `file:../jury`, and jury itself depends on `@seed/inference-utils` via `file:../utils`. `bun install` inside `packages/inference/router` symlinks `../jury` but does **not** recurse into jury's dependencies, so jury's `node_modules` stays empty and router's typecheck fails to resolve `@seed/inference-utils`. Locally this was invisible because jury's `node_modules` was already populated from prior dev work.
+
+Fix: added a conditional pre-step in `.github/workflows/test.yml` that runs `bun install --cwd packages/inference/utils` then `bun install --cwd packages/inference/jury` before the router install step, gated on `if: matrix.package == 'packages/inference/router'`. Only router has this transitive-`file:`-dep shape today, so the scope is narrow.
+
+Also nicked by a YAML parse failure on the first push of that step: an unquoted step name containing `file:` was parsed as a mapping key. Quoting the step name fixed it — GitHub Actions surfaces this only as "This run likely failed because of a workflow file issue" with no job logs, so the local `python3 -c "import yaml; yaml.safe_load(...)"` check earned its keep.
+
+### Installer false-negative: launchctl bootstrap exit 5
+**Issue:** phyter1/seed#43 — `fleet: installer treats launchctl bootstrap exit 5 as hard-failure when service is already loaded` — filed, diagnosis only
+
+Relevant code:
+- `packages/fleet/control/src/supervisors/launchd.ts:48-63` — `load()` calls `launchctl bootstrap`, falls back to `isLoaded(label)` on non-zero. The inline comment at `:50` says bootstrap returns **37** when already loaded, but the wild exit was **5**.
+- `packages/fleet/control/src/supervisors/launchd.ts:80-84` — `isLoaded()` uses `launchctl list <label>`, which has narrower semantics than `launchctl print gui/<uid>/<label>` (the command that *did* see the service in the deploy repro).
+- `packages/fleet/control/src/workload-installer.ts:640-641` — install pipeline calls `driver.unload` then `driver.load`, so a transitional bootout state might be what makes `list` miss the entry while `print` still shows it.
+
+Recommendation in the issue: probe `launchctl print gui/<uid>/<label>` before calling bootstrap, or widen the idempotency check beyond `list`. **No code change made** — diagnosis only, per task scope.
