@@ -147,7 +147,7 @@ Run `git log --oneline main | head -30` for the exact sequence.
 ```bash
 # Fleet status (from ryan-air)
 export SEED_CONTROL_URL=http://ren2.local:4310
-export SEED_OPERATOR_TOKEN=aaa3766d31da22f3800b138d8553aa07b842b85b46348ac0fdfa2b1461dc494a
+export SEED_OPERATOR_TOKEN=$SEED_OPERATOR_TOKEN
 seed status
 
 # Check backfill progress

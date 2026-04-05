@@ -20,7 +20,7 @@ Seed is operational as a fleet-management plane:
 
 What's missing: **no memory service**. Rusty Memory Haiku is still a standalone Python daemon that only lives on ren1. Agents on ren2/ren3/ryan-air have no clean way to query it, and it uses Haiku API for summarization when we have local models sitting idle.
 
-**Operator token for testing:** `aaa3766d31da22f3800b138d8553aa07b842b85b46348ac0fdfa2b1461dc494a`
+**Operator token for testing:** use your local `$SEED_OPERATOR_TOKEN` env var (redacted; rotated 2026-04-05)
 **Control plane URL:** `http://ren2.local:4310`
 **Memory.db backup:** `~/backups/ren1-cleanup-20260404/memory.db.20260404-1836` (9.4MB) on ryan-air
 
@@ -231,7 +231,7 @@ These are intentional design decisions. Don't revisit without reason:
 ```bash
 # Fleet status (from ryan-air)
 SEED_CONTROL_URL=http://ren2.local:4310 \
-SEED_OPERATOR_TOKEN=aaa3766d31da22f3800b138d8553aa07b842b85b46348ac0fdfa2b1461dc494a \
+SEED_OPERATOR_TOKEN=$SEED_OPERATOR_TOKEN \
 ~/.local/bin/seed status
 
 # Test ollama embeddings on ren1
