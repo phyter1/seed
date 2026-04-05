@@ -80,6 +80,18 @@ install_if_missing ollama "
   fi
 "
 
+# Gitleaks — required for the pre-push hook to block credential leaks.
+install_if_missing gitleaks "
+  if [ '$OS' = 'Darwin' ]; then
+    brew install gitleaks
+  else
+    # Download latest release binary for Linux
+    GL_VER=\$(curl -sfL https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep -o '\"tag_name\": *\"[^\"]*' | cut -d'\"' -f4)
+    curl -sfL \"https://github.com/gitleaks/gitleaks/releases/download/\${GL_VER}/gitleaks_\${GL_VER#v}_linux_x64.tar.gz\" | tar -xzC /tmp
+    install -m 0755 /tmp/gitleaks \"\$HOME/.local/bin/gitleaks\" 2>/dev/null || sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+  fi
+"
+
 # --- MLX (Apple Silicon only) ---
 if [ "$ARCH" = "arm64" ] && [ "$OS" = "Darwin" ]; then
   if ! python3 -c "import mlx_lm" 2>/dev/null; then
@@ -113,6 +125,19 @@ if [ ! -d "$HOME/.oh-my-zsh" ]; then
     ZSH_CUSTOM="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}"
     git clone https://github.com/spaceship-prompt/spaceship-prompt.git "$ZSH_CUSTOM/themes/spaceship-prompt" --depth=1
     ln -sf "$ZSH_CUSTOM/themes/spaceship-prompt/spaceship.zsh-theme" "$ZSH_CUSTOM/themes/spaceship.zsh-theme"
+  fi
+fi
+
+# --- Git hooks ---
+# Point git at the repo's checked-in hooks so pre-commit / pre-push scanners
+# are active for this clone. Idempotent — safe to re-run.
+if [ -d "$SEED_DIR/.githooks" ] && [ -d "$SEED_DIR/.git" ]; then
+  current=$(git -C "$SEED_DIR" config --get core.hooksPath || echo "")
+  if [ "$current" != ".githooks" ]; then
+    git -C "$SEED_DIR" config core.hooksPath .githooks
+    echo "✓ git hooks enabled (core.hooksPath = .githooks)"
+  else
+    echo "✓ git hooks already enabled"
   fi
 fi
 
