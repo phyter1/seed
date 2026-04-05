@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { runJoin } from "./cli";
+import { runJoin, runConfigure } from "./cli";
 import { hashToken } from "./auth";
 
 describe("runJoin", () => {
@@ -187,4 +187,113 @@ describe("runJoin", () => {
       })
     ).rejects.toThrow(/machine_id/);
   });
+});
+
+describe("runConfigure", () => {
+  test("writes both control_url and operator_token to configPath with 0600", async () => {
+    const writes: Record<string, { contents: string; mode: number }> = {};
+    const mkdirs: string[] = [];
+    const logs: string[] = [];
+
+    const result = await runConfigure({
+      controlUrl: "http://ren2.local:4310",
+      operatorToken: "f".repeat(64),
+      configPath: "/tmp/seed-cli-test/cli.json",
+      existing: {},
+      writeFile: (p, c, m) => {
+        writes[p] = { contents: c, mode: m };
+      },
+      mkdirp: (d) => {
+        mkdirs.push(d);
+      },
+      log: (m) => logs.push(m),
+    });
+
+    expect(writes["/tmp/seed-cli-test/cli.json"].mode).toBe(0o600);
+    const saved = JSON.parse(writes["/tmp/seed-cli-test/cli.json"].contents);
+    expect(saved.control_url).toBe("http://ren2.local:4310");
+    expect(saved.operator_token).toBe("f".repeat(64));
+    expect(mkdirs).toContain("/tmp/seed-cli-test");
+    expect(result.configPath).toBe("/tmp/seed-cli-test/cli.json");
+    expect(result.operatorTokenSet).toBe(true);
+    // Token must not leak into logs
+    expect(logs.join("\n")).not.toContain("f".repeat(64));
+    expect(logs.some((l) => l.includes("[set]"))).toBe(true);
+  });
+
+  test("preserves existing operator_token when only --control-url provided", async () => {
+    const writes: Record<string, { contents: string; mode: number }> = {};
+
+    await runConfigure({
+      controlUrl: "http://ren2.local:4310",
+      configPath: "/tmp/seed-cli-test/cli.json",
+      existing: { operator_token: "preserved-token" },
+      writeFile: (p, c, m) => {
+        writes[p] = { contents: c, mode: m };
+      },
+      mkdirp: () => {},
+      log: () => {},
+    });
+
+    const saved = JSON.parse(writes["/tmp/seed-cli-test/cli.json"].contents);
+    expect(saved.control_url).toBe("http://ren2.local:4310");
+    expect(saved.operator_token).toBe("preserved-token");
+  });
+
+  test("preserves existing control_url when only --operator-token provided", async () => {
+    const writes: Record<string, { contents: string; mode: number }> = {};
+
+    await runConfigure({
+      operatorToken: "new-token",
+      configPath: "/tmp/seed-cli-test/cli.json",
+      existing: { control_url: "http://ren2.local:4310" },
+      writeFile: (p, c, m) => {
+        writes[p] = { contents: c, mode: m };
+      },
+      mkdirp: () => {},
+      log: () => {},
+    });
+
+    const saved = JSON.parse(writes["/tmp/seed-cli-test/cli.json"].contents);
+    expect(saved.control_url).toBe("http://ren2.local:4310");
+    expect(saved.operator_token).toBe("new-token");
+  });
+
+  test("rejects empty invocation (no control_url or token)", async () => {
+    await expect(
+      runConfigure({
+        configPath: "/tmp/seed-cli-test/cli.json",
+        existing: {},
+        writeFile: () => {},
+        mkdirp: () => {},
+        log: () => {},
+      })
+    ).rejects.toThrow(/control-url or --operator-token/);
+  });
+
+  test("rejects --operator-token alone with no existing control_url", async () => {
+    await expect(
+      runConfigure({
+        operatorToken: "orphan-token",
+        configPath: "/tmp/seed-cli-test/cli.json",
+        existing: {},
+        writeFile: () => {},
+        mkdirp: () => {},
+        log: () => {},
+      })
+    ).rejects.toThrow(/control_url is required/);
+  });
+
+  test("reports operatorTokenSet=false when only URL is written", async () => {
+    const result = await runConfigure({
+      controlUrl: "http://ren2.local:4310",
+      configPath: "/tmp/seed-cli-test/cli.json",
+      existing: {},
+      writeFile: () => {},
+      mkdirp: () => {},
+      log: () => {},
+    });
+    expect(result.operatorTokenSet).toBe(false);
+  });
+
 });

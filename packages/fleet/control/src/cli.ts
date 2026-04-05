@@ -2,6 +2,7 @@
  * Seed Fleet CLI
  *
  * Usage:
+ *   bun run src/cli.ts configure [--control-url <url>] [--operator-token <token>]
  *   bun run src/cli.ts status
  *   bun run src/cli.ts approve <machine_id>
  *   bun run src/cli.ts revoke <machine_id>
@@ -9,47 +10,106 @@
  *   bun run src/cli.ts audit [--limit N]
  *   bun run src/cli.ts join <control_url> [--machine-id <id>] [--display-name <name>]
  *
- * Config:
+ * Config resolution (env vars win over the config file):
  *   SEED_CONTROL_URL — control plane URL (default: http://localhost:4310)
  *   SEED_OPERATOR_TOKEN — operator bearer token
+ *   ~/.config/seed-fleet/cli.json — { control_url, operator_token }
+ *   SEED_CLI_CONFIG — override path to cli.json
  */
 
 import { generateToken, hashToken } from "./auth";
 import { SEED_VERSION, SEED_REPO } from "./version";
 import { fetchRelease, runSelfUpdate } from "./self-update";
 
+const DEFAULT_CONTROL_URL = "http://localhost:4310";
+
+function cliConfigPath(): string {
+  return (
+    process.env.SEED_CLI_CONFIG ??
+    `${process.env.HOME}/.config/seed-fleet/cli.json`
+  );
+}
+
+interface CliConfigFile {
+  control_url?: string;
+  operator_token?: string;
+}
+
+function readCliConfig(): CliConfigFile {
+  try {
+    const text = require("fs").readFileSync(cliConfigPath(), "utf-8");
+    const parsed = JSON.parse(text);
+    return {
+      control_url: parsed.control_url,
+      operator_token: parsed.operator_token,
+    };
+  } catch {
+    return {};
+  }
+}
+
 function getControlUrl(): string {
   return (
     process.env.SEED_CONTROL_URL ??
-    (() => {
-      try {
-        const text = require("fs").readFileSync(
-          `${process.env.HOME}/.config/seed-fleet/cli.json`,
-          "utf-8"
-        );
-        return JSON.parse(text).control_url;
-      } catch {
-        return "http://localhost:4310";
-      }
-    })()
+    readCliConfig().control_url ??
+    DEFAULT_CONTROL_URL
   );
+}
+
+function getOperatorToken(): string | undefined {
+  return process.env.SEED_OPERATOR_TOKEN ?? readCliConfig().operator_token;
 }
 
 function getHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
-  const token = process.env.SEED_OPERATOR_TOKEN;
+  const token = getOperatorToken();
   if (token) headers["Authorization"] = `Bearer ${token}`;
   return headers;
 }
 
+function printConnectionHint(url: string): void {
+  console.error(`Could not reach control plane at ${url}.`);
+  console.error("");
+  console.error("To point the CLI at a control plane, do one of:");
+  console.error("  • seed fleet configure --control-url <url> --operator-token <token>");
+  console.error("  • export SEED_CONTROL_URL=<url> SEED_OPERATOR_TOKEN=<token>");
+  console.error("");
+  console.error(`Current config file: ${cliConfigPath()}`);
+}
+
+function printAuthHint(url: string, status: number, hasToken: boolean): void {
+  if (status === 401 && !hasToken) {
+    console.error(`Control plane at ${url} requires an operator token.`);
+  } else if (status === 401) {
+    console.error(`Control plane at ${url} did not accept the operator token (401).`);
+  } else {
+    console.error(`Control plane at ${url} rejected the operator token (403).`);
+    console.error("The token is present but wrong — likely stale or rotated.");
+  }
+  console.error("");
+  console.error("Set the token with:");
+  console.error("  • seed fleet configure --operator-token <token>");
+  console.error("  • export SEED_OPERATOR_TOKEN=<token>");
+}
+
 async function apiGet(path: string): Promise<any> {
   const url = `${getControlUrl()}${path}`;
-  const res = await fetch(url, { headers: getHeaders() });
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: getHeaders() });
+  } catch (err: any) {
+    printConnectionHint(getControlUrl());
+    process.exit(1);
+  }
   if (!res.ok) {
     const body = await res.text();
-    console.error(`Error ${res.status}: ${body}`);
+    if (res.status === 401 || res.status === 403) {
+      printAuthHint(getControlUrl(), res.status, Boolean(getOperatorToken()));
+    } else {
+      console.error(`Error ${res.status}: ${body}`);
+    }
     process.exit(1);
   }
   return res.json();
@@ -57,14 +117,24 @@ async function apiGet(path: string): Promise<any> {
 
 async function apiPost(path: string, body?: any): Promise<any> {
   const url = `${getControlUrl()}${path}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: getHeaders(),
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: getHeaders(),
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (err: any) {
+    printConnectionHint(getControlUrl());
+    process.exit(1);
+  }
   if (!res.ok) {
     const text = await res.text();
-    console.error(`Error ${res.status}: ${text}`);
+    if (res.status === 401 || res.status === 403) {
+      printAuthHint(getControlUrl(), res.status, Boolean(getOperatorToken()));
+    } else {
+      console.error(`Error ${res.status}: ${text}`);
+    }
     process.exit(1);
   }
   return res.json();
@@ -302,6 +372,105 @@ async function cmdAudit(limit: number) {
     console.log(
       `${ts.padEnd(22)} ${event.padEnd(18)} ${machine.padEnd(12)} ${action.padEnd(20)} ${result}`
     );
+  }
+}
+
+/**
+ * Write the operator CLI config to ~/.config/seed-fleet/cli.json.
+ *
+ * Merges with any existing config — passing only --control-url leaves
+ * the existing operator_token in place, and vice versa. At least one
+ * field must be provided.
+ *
+ * Exported so tests can exercise it with injected IO.
+ */
+export interface ConfigureOptions {
+  controlUrl?: string;
+  operatorToken?: string;
+  configPath?: string;
+  existing?: CliConfigFile;
+  writeFile?: (path: string, contents: string, mode: number) => void;
+  mkdirp?: (dir: string) => void;
+  log?: (msg: string) => void;
+}
+
+export interface ConfigureResult {
+  configPath: string;
+  controlUrl: string;
+  operatorTokenSet: boolean;
+}
+
+export async function runConfigure(
+  opts: ConfigureOptions
+): Promise<ConfigureResult> {
+  const log = opts.log ?? ((m: string) => console.log(m));
+
+  if (!opts.controlUrl && !opts.operatorToken) {
+    throw new Error(
+      "at least one of --control-url or --operator-token is required"
+    );
+  }
+
+  const configPath = opts.configPath ?? cliConfigPath();
+  const existing = opts.existing ?? readCliConfig();
+
+  const merged: CliConfigFile = {
+    control_url: opts.controlUrl ?? existing.control_url,
+    operator_token: opts.operatorToken ?? existing.operator_token,
+  };
+
+  if (!merged.control_url) {
+    throw new Error("control_url is required (no existing value to fall back to)");
+  }
+
+  const contents = JSON.stringify(merged, null, 2);
+
+  if (opts.writeFile) {
+    if (opts.mkdirp) opts.mkdirp(dirname(configPath));
+    opts.writeFile(configPath, contents, 0o600);
+  } else {
+    const fs = require("fs");
+    fs.mkdirSync(dirname(configPath), { recursive: true });
+    const tmp = configPath + ".tmp";
+    fs.writeFileSync(tmp, contents, { mode: 0o600 });
+    fs.renameSync(tmp, configPath);
+  }
+
+  log(`Wrote ${configPath}`);
+  log(`  control_url:    ${merged.control_url}`);
+  log(`  operator_token: ${merged.operator_token ? "[set]" : "[unset]"}`);
+
+  return {
+    configPath,
+    controlUrl: merged.control_url,
+    operatorTokenSet: Boolean(merged.operator_token),
+  };
+}
+
+async function cmdConfigure(args: string[]) {
+  let controlUrl: string | undefined;
+  let operatorToken: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--control-url" && args[i + 1]) {
+      controlUrl = args[++i];
+    } else if (a === "--operator-token" && args[i + 1]) {
+      operatorToken = args[++i];
+    } else {
+      console.error(`Unknown argument: ${a}`);
+      console.error(
+        "Usage: seed fleet configure [--control-url <url>] [--operator-token <token>]"
+      );
+      process.exit(1);
+    }
+  }
+
+  try {
+    await runConfigure({ controlUrl, operatorToken });
+  } catch (err: any) {
+    console.error(`Error: ${err?.message ?? err}`);
+    process.exit(1);
   }
 }
 
@@ -689,6 +858,10 @@ async function main() {
   const command = args[0];
 
   switch (command) {
+    case "configure":
+      await cmdConfigure(args.slice(1));
+      break;
+
     case "status":
       await cmdStatus();
       break;
@@ -748,6 +921,10 @@ async function main() {
       console.log("Usage: seed fleet <command>");
       console.log("");
       console.log("Commands:");
+      console.log(
+        "  configure [--control-url <url>] [--operator-token <token>]"
+      );
+      console.log("                      Write ~/.config/seed-fleet/cli.json");
       console.log("  status              List all machines with health");
       console.log("  approve <id>        Approve a pending machine");
       console.log("  revoke <id>         Revoke an accepted machine");
