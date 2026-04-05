@@ -19,7 +19,7 @@ Seed has a working fleet control plane with turnkey install for macOS + Linux:
 - ❌ Ren1 still runs legacy infrastructure (heartbeat, ren-queue, memory agent)
 - ❌ No centralized memory service — Rusty Memory Haiku is a separate repo on ren1
 
-**Operator token for testing:** `aaa3766d31da22f3800b138d8553aa07b842b85b46348ac0fdfa2b1461dc494a`
+**Operator token for testing:** use your local `$SEED_OPERATOR_TOKEN` env var (redacted; rotated 2026-04-05)
 **Control plane URL:** `http://ren2.local:4310`
 
 ---
@@ -196,7 +196,7 @@ Last phase. Strip ren1 the same way we did ren2, install Seed agent + memory ser
 ```bash
 # Check fleet status (from ryan-air)
 SEED_CONTROL_URL=http://ren2.local:4310 \
-SEED_OPERATOR_TOKEN=aaa3766d31da22f3800b138d8553aa07b842b85b46348ac0fdfa2b1461dc494a \
+SEED_OPERATOR_TOKEN=$SEED_OPERATOR_TOKEN \
 ~/.local/bin/seed status
 
 # SSH into fleet machines (passwordless auth configured)
