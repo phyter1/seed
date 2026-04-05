@@ -6,6 +6,11 @@ export class OpenAICompatibleProviderAdapter extends BaseProviderAdapter {
       id: "openai_compatible",
       displayName: "OpenAI-Compatible Endpoint",
       locality: "cloud",
+      // Generic endpoint — tier depends on what the caller points it
+      // at. Default to local since seed most often uses this adapter
+      // against on-fleet endpoints; callers override at construction
+      // if pointing at a cloud endpoint.
+      tier: "local",
       capabilities: {
         tools: false,
         structuredOutput: false,

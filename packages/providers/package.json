@@ -1,12 +1,17 @@
 {
   "name": "@seed/providers",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "list": "bun run src/list.ts"
+    "list": "bun run src/list.ts",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit"
   },
   "dependencies": {
     "typescript": "^5.7.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
   }
 }

@@ -6,6 +6,7 @@ export class OllamaProviderAdapter extends BaseProviderAdapter {
       id: "ollama",
       displayName: "Ollama",
       locality: "local",
+      tier: "local",
       capabilities: {
         tools: false,
         structuredOutput: false,

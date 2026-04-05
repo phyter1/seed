@@ -3,11 +3,22 @@ export type ProviderId =
   | "openai"
   | "gemini"
   | "openrouter"
+  | "cerebras"
+  | "groq"
   | "ollama"
   | "mlx_openai_compatible"
   | "openai_compatible";
 
 export type ProviderLocality = "local" | "cloud";
+
+/**
+ * Escalation tier for the jury challenge round and any future tiered
+ * routing. "local" = on-fleet inference, "midtier" = cheap/fast cloud
+ * (gemini-flash, groq, cerebras, most openrouter models), "frontier" =
+ * opus/gpt-5 class. Tier is a provider-level default; specific models
+ * (e.g. openrouter/claude-opus) may override in a per-model table.
+ */
+export type ProviderTier = "local" | "midtier" | "frontier";
 
 export interface ProviderCapabilities {
   tools: boolean;
@@ -24,6 +35,10 @@ export interface ProviderInvocationOptions {
   }>;
   temperature?: number;
   maxTokens?: number;
+  /** Optional per-call API key override. Falls back to env-var resolution. */
+  apiKey?: string;
+  /** Optional per-call base URL override. Falls back to defaultBaseUrl. */
+  baseUrl?: string;
 }
 
 export interface ProviderInvocationResult {
@@ -41,6 +56,7 @@ export interface ProviderDefinition {
   id: ProviderId;
   displayName: string;
   locality: ProviderLocality;
+  tier: ProviderTier;
   defaultBaseUrl?: string;
   capabilities: ProviderCapabilities;
   notes?: string[];
