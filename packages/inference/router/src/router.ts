@@ -21,6 +21,14 @@ import {
   type Provider as TelemetryProvider,
   type RouteType as TelemetryRouteType,
 } from "./telemetry";
+import {
+  runJury as runJuryPrimitive,
+  makeDefaultAggregator,
+  calculateAgreement,
+  type JurorAssignment as SeedJurorAssignment,
+  type JurorResult as SeedJurorResult,
+  type ChatMessage as SeedChatMessage,
+} from "@seed/jury";
 
 // ── Load Config ────────────────────────────────────────────────────────────
 
@@ -422,159 +430,241 @@ function withPrePickedQueue<T>(machine: string, fn: () => Promise<T>): Promise<T
 }
 
 // ── Jury Mode ──────────────────────────────────────────────────────────────
+//
+// Fan-out/aggregate mechanics live in @seed/jury. This file wires the
+// fleet's machine-queue, telemetry events, and SSE stream shape to that
+// primitive. The aggregator prompt is kept byte-identical to the prior
+// inline version so production synthesis behaviour does not drift.
 
 const JURY_MODELS = FLEET.filter(m => m.provider === "ollama");
 const JURY_TEMPERATURES = [0.3, 0.5, 0.7, 0.9];
 
-function calculateAgreement(responses: string[]): number {
-  if (responses.length <= 1) return 1;
-  const wordSets = responses.map(r => new Set(r.toLowerCase().split(/\s+/).filter(w => w.length > 3)));
-  let totalOverlap = 0;
-  let pairs = 0;
-  for (let i = 0; i < wordSets.length; i++) {
-    for (let j = i + 1; j < wordSets.length; j++) {
-      const intersection = new Set([...wordSets[i]].filter(w => wordSets[j].has(w)));
-      const union = new Set([...wordSets[i], ...wordSets[j]]);
-      totalOverlap += union.size > 0 ? intersection.size / union.size : 0;
-      pairs++;
-    }
-  }
-  return pairs > 0 ? Math.round((totalOverlap / pairs) * 100) / 100 : 1;
+interface JuryTask {
+  entry: ModelEntry;
+  temperature: number;
+  jurorId: string;
+  index: number;
 }
 
-async function aggregateJury(question: string, jurorResults: JurorResult[], maxTokens: number): Promise<string> {
-  const valid = jurorResults.filter(r => !r.error && r.content.length > 0);
-  if (valid.length === 0) throw new Error("All jurors failed");
-  if (valid.length === 1) return valid[0].content;
+function buildJuryTasks(): JuryTask[] {
+  const ollamaMachineNames = OLLAMA_MACHINES.map(m => m.name);
+  const uniqueModels = [...new Set(JURY_MODELS.map(m => m.model))];
+  const tasks: JuryTask[] = [];
+  let tempIdx = 0;
+  for (const machineName of ollamaMachineNames) {
+    for (const model of uniqueModels) {
+      const entry = JURY_MODELS.find(m => m.machine === machineName && m.model === model);
+      if (entry) {
+        tasks.push({
+          entry,
+          temperature: JURY_TEMPERATURES[tempIdx % JURY_TEMPERATURES.length],
+          jurorId: `${entry.model}@${entry.machine}`,
+          index: tasks.length,
+        });
+        tempIdx++;
+      }
+    }
+  }
+  return tasks;
+}
 
-  const responsesText = valid
-    .map((r, i) => `[Juror ${i + 1} (${r.model}@${r.machine})]:\n${r.content}`)
-    .join("\n\n");
+function buildJurorAssignments(tasks: JuryTask[]): SeedJurorAssignment[] {
+  return tasks.map(({ entry, temperature, jurorId }) => ({
+    id: jurorId,
+    temperature,
+    invoke: async (msgs, opts) => {
+      const res = await callOllama(entry.host, entry.model, msgs as ChatMessage[], {
+        temperature: opts.temperature,
+        maxTokens: opts.maxTokens,
+      });
+      return {
+        content: res.content,
+        promptTokens: res.usage?.prompt_tokens,
+        completionTokens: res.usage?.completion_tokens,
+      };
+    },
+  }));
+}
 
-  const aggregationPrompt = `You are synthesizing ${valid.length} model responses into one best answer. Be concise and direct.
+function aggregatorMachine(): string {
+  return (FLEET.find(m => m.provider === "openai_compatible")?.machine) ?? "mlx";
+}
 
-Question: ${question}
+/**
+ * MLX-backed aggregator using the router's original synthesis prompt.
+ * Matches the prior inline implementation byte-for-byte so deployed
+ * behaviour is preserved. Callers that want the quality-review-aware
+ * prompt can switch to @seed/jury's makeDefaultAggregator.
+ */
+function makeRouterAggregator(maxTokens: number) {
+  return async (ctx: { question: string; jurors: SeedJurorResult[] }): Promise<string> => {
+    const valid = ctx.jurors.filter(r => !r.error && r.content.length > 0);
+    if (valid.length === 0) throw new Error("All jurors failed");
+    if (valid.length === 1) return valid[0].content;
+
+    const responsesText = valid
+      .map((r, i) => `[Juror ${i + 1} (${r.id})]:\n${r.content}`)
+      .join("\n\n");
+
+    const aggregationPrompt = `You are synthesizing ${valid.length} model responses into one best answer. Be concise and direct.
+
+Question: ${ctx.question}
 
 Responses:
 ${responsesText}
 
 Synthesize into a single best response. Take the strongest elements from each. Do not mention the jurors or the synthesis process.`;
 
-  const aggregated = await callOpenAICompatible(MLX_HOST, MLX_MODEL, [{ role: "user", content: aggregationPrompt }], { temperature: 0.3, maxTokens });
-  return aggregated.content;
+    const aggregated = await callOpenAICompatible(
+      MLX_HOST,
+      MLX_MODEL,
+      [{ role: "user", content: aggregationPrompt }],
+      { temperature: 0.3, maxTokens },
+    );
+    return aggregated.content;
+  };
 }
 
-async function runJury(messages: ChatMessage[], options: { maxTokens?: number } = {}): Promise<JuryResult> {
-  const start = Date.now();
-  const maxTokens = options.maxTokens ?? 512;
-  const lastUserMsg = messages[messages.length - 1].content;
+/** Map a @seed/jury juror result back to the router's public JurorResult shape. */
+function toRouterJuror(seed: SeedJurorResult, task: JuryTask): JurorResult {
+  return {
+    machine: task.entry.machine,
+    model: task.entry.model,
+    content: seed.content,
+    tokS: seed.tokensPerSecond,
+    wallS: Math.round(seed.durationMs / 100) / 10,
+    error: seed.error,
+  };
+}
 
-  // Build distributed tasks: each model on each machine
-  const ollamaMachineNames = OLLAMA_MACHINES.map(m => m.name);
-  const uniqueModels = [...new Set(JURY_MODELS.map(m => m.model))];
-  const tasks: { entry: ModelEntry; temperature: number }[] = [];
-  let tempIdx = 0;
-  for (const machineName of ollamaMachineNames) {
-    for (const model of uniqueModels) {
-      const entry = JURY_MODELS.find(m => m.machine === machineName && m.model === model);
-      if (entry) {
-        tasks.push({ entry, temperature: JURY_TEMPERATURES[tempIdx % JURY_TEMPERATURES.length] });
-        tempIdx++;
-      }
-    }
-  }
+/** Emit the jury_juror telemetry event. */
+function emitJurorTelemetry(
+  task: JuryTask,
+  result: SeedJurorResult,
+  maxTokens: number,
+  jurySize: number,
+  stream: boolean,
+): void {
+  const errMsg = result.error;
+  telemetry.emit(buildInferenceEvent({
+    event_type: "jury_juror",
+    model: task.entry.model,
+    machine: task.entry.machine,
+    provider: "ollama",
+    route_type: "jury",
+    route_pattern: "juror",
+    tokens_prompt: result.promptTokens ?? 0,
+    tokens_completion: result.completionTokens ?? 0,
+    duration_ms: result.durationMs,
+    status: errMsg ? "error" : "success",
+    thinking_mode: false,
+    sampler_preset: samplerPresetLabel(task.temperature, maxTokens),
+    extra: {
+      juror_index: task.index,
+      jury_size: jurySize,
+      ...(stream ? { stream: true } : {}),
+      ...(errMsg ? { error: errMsg.slice(0, 500) } : {}),
+    },
+  }));
+}
 
-  const results = await Promise.all(
-    tasks.map(({ entry, temperature }, jurorIndex) =>
-      withMachineQueue(entry.machine, async () => {
-        const taskStart = Date.now();
-        try {
-          const res = await callOllama(entry.host, entry.model, messages, { temperature, maxTokens });
-          const wallS = (Date.now() - taskStart) / 1000;
-          const tokS = res.usage && res.usage.completion_tokens > 0 && wallS > 0
-            ? Math.round(res.usage.completion_tokens / wallS * 10) / 10 : 0;
-          telemetry.emit(buildInferenceEvent({
-            event_type: "jury_juror",
-            model: entry.model,
-            machine: entry.machine,
-            provider: "ollama",
-            route_type: "jury",
-            route_pattern: "juror",
-            tokens_prompt: res.usage?.prompt_tokens ?? 0,
-            tokens_completion: res.usage?.completion_tokens ?? 0,
-            duration_ms: Date.now() - taskStart,
-            status: "success",
-            thinking_mode: false,
-            sampler_preset: samplerPresetLabel(temperature, maxTokens),
-            extra: { juror_index: jurorIndex, jury_size: tasks.length },
-          }));
-          return { machine: entry.machine, model: entry.model, content: res.content, tokS, wallS: Math.round(wallS * 10) / 10, error: null };
-        } catch (err) {
-          telemetry.emit(buildInferenceEvent({
-            event_type: "jury_juror",
-            model: entry.model,
-            machine: entry.machine,
-            provider: "ollama",
-            route_type: "jury",
-            route_pattern: "juror",
-            tokens_prompt: 0,
-            tokens_completion: 0,
-            duration_ms: Date.now() - taskStart,
-            status: "error",
-            thinking_mode: false,
-            sampler_preset: samplerPresetLabel(temperature, maxTokens),
-            extra: { juror_index: jurorIndex, jury_size: tasks.length, error: String(err).slice(0, 500) },
-          }));
-          return { machine: entry.machine, model: entry.model, content: "", tokS: 0, wallS: Math.round((Date.now() - taskStart) / 100) / 10, error: String(err) };
-        }
-      })
-    )
-  );
-
-  const valid = results.filter(r => !r.error && r.content.length > 0);
-  const aggregateStart = Date.now();
-  let consensus: string;
-  let aggregateStatus: "success" | "error" = "success";
-  try {
-    consensus = await aggregateJury(lastUserMsg, results, maxTokens);
-  } catch (err) {
-    aggregateStatus = "error";
-    telemetry.emit(buildInferenceEvent({
-      event_type: "jury_aggregate",
-      model: MLX_MODEL,
-      machine: (FLEET.find(m => m.provider === "openai_compatible")?.machine) ?? "mlx",
-      provider: "mlx",
-      route_type: "jury",
-      route_pattern: "aggregate",
-      tokens_prompt: 0,
-      tokens_completion: 0,
-      duration_ms: Date.now() - aggregateStart,
-      status: "error",
-      thinking_mode: false,
-      sampler_preset: samplerPresetLabel(0.3, maxTokens),
-      extra: { jurors_responded: valid.length, jury_size: tasks.length, total_ms: Date.now() - start, error: String(err).slice(0, 500) },
-    }));
-    throw err;
-  }
-  const agreement = calculateAgreement(valid.map(r => r.content));
-
+function emitAggregateTelemetry(
+  args: {
+    durationMs: number;
+    status: "success" | "error";
+    jurorsResponded: number;
+    jurySize: number;
+    agreement?: number;
+    totalMs: number;
+    maxTokens: number;
+    stream: boolean;
+    error?: string;
+  },
+): void {
   telemetry.emit(buildInferenceEvent({
     event_type: "jury_aggregate",
     model: MLX_MODEL,
-    machine: (FLEET.find(m => m.provider === "openai_compatible")?.machine) ?? "mlx",
+    machine: aggregatorMachine(),
     provider: "mlx",
     route_type: "jury",
     route_pattern: "aggregate",
     tokens_prompt: 0,
     tokens_completion: 0,
-    duration_ms: Date.now() - aggregateStart,
-    status: aggregateStatus,
+    duration_ms: args.durationMs,
+    status: args.status,
     thinking_mode: false,
-    sampler_preset: samplerPresetLabel(0.3, maxTokens),
-    extra: { jurors_responded: valid.length, jury_size: tasks.length, agreement, total_ms: Date.now() - start },
+    sampler_preset: samplerPresetLabel(0.3, args.maxTokens),
+    extra: {
+      jurors_responded: args.jurorsResponded,
+      jury_size: args.jurySize,
+      ...(args.stream ? { stream: true } : {}),
+      ...(args.agreement !== undefined ? { agreement: args.agreement } : {}),
+      total_ms: args.totalMs,
+      ...(args.error ? { error: args.error.slice(0, 500) } : {}),
+    },
   }));
+}
 
-  return { consensus, jurors: results, agreement, totalMs: Date.now() - start };
+async function runJury(messages: ChatMessage[], options: { maxTokens?: number } = {}): Promise<JuryResult> {
+  const start = Date.now();
+  const maxTokens = options.maxTokens ?? 512;
+  const tasks = buildJuryTasks();
+  const taskById = new Map(tasks.map(t => [t.jurorId, t]));
+  const validContents: string[] = [];
+  let aggregateDurationCapture = 0;
+
+  try {
+    const response = await runJuryPrimitive({
+      messages: messages as SeedChatMessage[],
+      jurors: buildJurorAssignments(tasks),
+      aggregator: makeRouterAggregator(maxTokens),
+      maxTokens,
+      queue: (id, task) => withMachineQueue(taskById.get(id)!.entry.machine, task),
+      onJurorComplete: (result) => {
+        const task = taskById.get(result.id);
+        if (!task) return;
+        emitJurorTelemetry(task, result, maxTokens, tasks.length, false);
+        if (!result.error && result.content.length > 0) {
+          validContents.push(result.content);
+        }
+      },
+      onAggregateComplete: (info) => {
+        aggregateDurationCapture = info.durationMs;
+        if (info.status === "error") {
+          emitAggregateTelemetry({
+            durationMs: info.durationMs,
+            status: "error",
+            jurorsResponded: validContents.length,
+            jurySize: tasks.length,
+            totalMs: Date.now() - start,
+            maxTokens,
+            stream: false,
+            error: info.error,
+          });
+        }
+      },
+    });
+
+    emitAggregateTelemetry({
+      durationMs: aggregateDurationCapture,
+      status: "success",
+      jurorsResponded: validContents.length,
+      jurySize: tasks.length,
+      agreement: response.agreement,
+      totalMs: response.totalDurationMs,
+      maxTokens,
+      stream: false,
+    });
+
+    return {
+      consensus: response.consensus,
+      jurors: response.jurors.map(j => toRouterJuror(j, taskById.get(j.id)!)),
+      agreement: response.agreement,
+      totalMs: response.totalDurationMs,
+    };
+  } catch (err) {
+    throw err;
+  }
 }
 
 // ── Streaming Jury ──────────────────────────────────────────────────────────
@@ -588,163 +678,155 @@ async function runJuryStreaming(messages: ChatMessage[], writer: WritableStreamD
   const write = (event: string, data: unknown) => writer.write(encoder.encode(sseEvent(event, data)));
   const start = Date.now();
   const maxTokens = options.maxTokens ?? 512;
-  const lastUserMsg = messages[messages.length - 1].content;
-
+  const tasks = buildJuryTasks();
+  const taskById = new Map(tasks.map(t => [t.jurorId, t]));
   const ollamaMachineNames = OLLAMA_MACHINES.map(m => m.name);
-  const uniqueModels = [...new Set(JURY_MODELS.map(m => m.model))];
-  const tasks: { entry: ModelEntry; temperature: number }[] = [];
-  let tempIdx = 0;
-  for (const machineName of ollamaMachineNames) {
-    for (const model of uniqueModels) {
-      const entry = JURY_MODELS.find(m => m.machine === machineName && m.model === model);
-      if (entry) {
-        tasks.push({ entry, temperature: JURY_TEMPERATURES[tempIdx % JURY_TEMPERATURES.length] });
-        tempIdx++;
-      }
-    }
-  }
 
-  await write("jury.start", { tasks: tasks.length, machines: ollamaMachineNames.length, aggregator: MLX_MODEL, timestamp: new Date().toISOString() });
+  await write("jury.start", {
+    tasks: tasks.length,
+    machines: ollamaMachineNames.length,
+    aggregator: MLX_MODEL,
+    timestamp: new Date().toISOString(),
+  });
 
-  const jurorResults: JurorResult[] = [];
+  const validContents: string[] = [];
   let completed = 0;
+  let deliberationAnnounced = false;
+  let aggregationAnnounced = false;
+  let allFailedHandled = false;
+  // onJurorComplete is invoked synchronously by the jury primitive (not
+  // awaited), so we serialize juror.done writes through a promise chain
+  // and drain it before the streamingAggregator emits the next event.
+  let writeChain: Promise<void> = Promise.resolve();
+  const baseAggregator = makeRouterAggregator(maxTokens);
 
-  const promises = tasks.map(async ({ entry, temperature }, jurorIndex) => {
-    const result = await withMachineQueue(entry.machine, async () => {
-      const taskStart = Date.now();
-      try {
-        const res = await callOllama(entry.host, entry.model, messages, { temperature, maxTokens });
-        const wallS = (Date.now() - taskStart) / 1000;
-        const tokS = res.usage && res.usage.completion_tokens > 0 && wallS > 0
-          ? Math.round(res.usage.completion_tokens / wallS * 10) / 10 : 0;
-        telemetry.emit(buildInferenceEvent({
-          event_type: "jury_juror",
-          model: entry.model,
-          machine: entry.machine,
-          provider: "ollama",
-          route_type: "jury",
-          route_pattern: "juror",
-          tokens_prompt: res.usage?.prompt_tokens ?? 0,
-          tokens_completion: res.usage?.completion_tokens ?? 0,
-          duration_ms: Date.now() - taskStart,
-          status: "success",
-          thinking_mode: false,
-          sampler_preset: samplerPresetLabel(temperature, maxTokens),
-          extra: { juror_index: jurorIndex, jury_size: tasks.length, stream: true },
-        }));
-        return { machine: entry.machine, model: entry.model, content: res.content, tokS, wallS: Math.round(wallS * 10) / 10, error: null };
-      } catch (err) {
-        telemetry.emit(buildInferenceEvent({
-          event_type: "jury_juror",
-          model: entry.model,
-          machine: entry.machine,
-          provider: "ollama",
-          route_type: "jury",
-          route_pattern: "juror",
-          tokens_prompt: 0,
-          tokens_completion: 0,
-          duration_ms: Date.now() - taskStart,
-          status: "error",
-          thinking_mode: false,
-          sampler_preset: samplerPresetLabel(temperature, maxTokens),
-          extra: { juror_index: jurorIndex, jury_size: tasks.length, stream: true, error: String(err).slice(0, 500) },
-        }));
-        return { machine: entry.machine, model: entry.model, content: "", tokS: 0, wallS: Math.round((Date.now() - taskStart) / 100) / 10, error: String(err) };
-      }
-    });
-    jurorResults.push(result);
-    completed++;
-    await write("juror.done", {
-      machine: result.machine,
-      model: result.model,
-      answer: result.content.slice(0, 300),
-      tokS: result.tokS,
-      wallS: result.wallS,
-      error: result.error,
-      index: completed,
-      total: tasks.length,
-    });
-    return result;
-  });
+  // Wrap the aggregator to emit deliberation_complete + aggregation.start
+  // at the exact moment jurors are done and aggregation begins. The
+  // primitive calls the aggregator immediately after all jurors return,
+  // so this is the correct insertion point.
+  const streamingAggregator = async (ctx: { question: string; jurors: SeedJurorResult[] }) => {
+    // Drain any in-flight juror.done writes before emitting deliberation_complete.
+    await writeChain;
+    const valid = ctx.jurors.filter(j => !j.error && j.content.length > 0);
+    if (!deliberationAnnounced) {
+      deliberationAnnounced = true;
+      await write("jury.deliberation_complete", {
+        responded: valid.length,
+        total: tasks.length,
+        elapsed_ms: Date.now() - start,
+      });
+    }
+    if (valid.length === 0) {
+      // Mirror original behaviour: emit specific telemetry + jury.error
+      // + done, close writer, and short-circuit with a sentinel throw
+      // so runJuryPrimitive stops before calling the MLX aggregator.
+      allFailedHandled = true;
+      emitAggregateTelemetry({
+        durationMs: 0,
+        status: "error",
+        jurorsResponded: 0,
+        jurySize: tasks.length,
+        totalMs: Date.now() - start,
+        maxTokens,
+        stream: true,
+        error: "all_jurors_failed",
+      });
+      await write("jury.error", { error: "All jurors failed" });
+      await write("done", {});
+      await writer.close();
+      throw new JuryAllFailedSentinel();
+    }
+    if (!aggregationAnnounced) {
+      aggregationAnnounced = true;
+      await write("aggregation.start", { aggregator: MLX_MODEL, input_count: valid.length });
+    }
+    return baseAggregator(ctx);
+  };
 
-  await Promise.all(promises);
+  let aggregateDurationCapture = 0;
 
-  const valid = jurorResults.filter(r => !r.error && r.content.length > 0);
-  await write("jury.deliberation_complete", {
-    responded: valid.length,
-    total: tasks.length,
-    elapsed_ms: Date.now() - start,
-  });
-
-  const aggregatorMachine = (FLEET.find(m => m.provider === "openai_compatible")?.machine) ?? "mlx";
-
-  if (valid.length === 0) {
-    telemetry.emit(buildInferenceEvent({
-      event_type: "jury_aggregate",
-      model: MLX_MODEL,
-      machine: aggregatorMachine,
-      provider: "mlx",
-      route_type: "jury",
-      route_pattern: "aggregate",
-      tokens_prompt: 0,
-      tokens_completion: 0,
-      duration_ms: 0,
-      status: "error",
-      thinking_mode: false,
-      sampler_preset: samplerPresetLabel(0.3, maxTokens),
-      extra: { jurors_responded: 0, jury_size: tasks.length, stream: true, total_ms: Date.now() - start, error: "all_jurors_failed" },
-    }));
-    await write("jury.error", { error: "All jurors failed" });
-    await write("done", {});
-    await writer.close();
-    return;
-  }
-
-  await write("aggregation.start", { aggregator: MLX_MODEL, input_count: valid.length });
-
-  const aggregateStart = Date.now();
-  let consensus: string;
   try {
-    consensus = await aggregateJury(lastUserMsg, jurorResults, maxTokens);
+    const response = await runJuryPrimitive({
+      messages: messages as SeedChatMessage[],
+      jurors: buildJurorAssignments(tasks),
+      aggregator: streamingAggregator,
+      maxTokens,
+      queue: (id, task) => withMachineQueue(taskById.get(id)!.entry.machine, task),
+      onJurorComplete: (result) => {
+        const task = taskById.get(result.id);
+        if (!task) return;
+        emitJurorTelemetry(task, result, maxTokens, tasks.length, true);
+        if (!result.error && result.content.length > 0) {
+          validContents.push(result.content);
+        }
+        completed++;
+        const index = completed;
+        const routerJuror = toRouterJuror(result, task);
+        writeChain = writeChain.then(() => write("juror.done", {
+          machine: routerJuror.machine,
+          model: routerJuror.model,
+          answer: routerJuror.content.slice(0, 300),
+          tokS: routerJuror.tokS,
+          wallS: routerJuror.wallS,
+          error: routerJuror.error,
+          index,
+          total: tasks.length,
+        }));
+      },
+      onAggregateComplete: (info) => {
+        aggregateDurationCapture = info.durationMs;
+        if (info.status === "error" && !allFailedHandled) {
+          emitAggregateTelemetry({
+            durationMs: info.durationMs,
+            status: "error",
+            jurorsResponded: validContents.length,
+            jurySize: tasks.length,
+            totalMs: Date.now() - start,
+            maxTokens,
+            stream: true,
+            error: info.error,
+          });
+        }
+      },
+    });
+
+    emitAggregateTelemetry({
+      durationMs: aggregateDurationCapture,
+      status: "success",
+      jurorsResponded: validContents.length,
+      jurySize: tasks.length,
+      agreement: response.agreement,
+      totalMs: response.totalDurationMs,
+      maxTokens,
+      stream: true,
+    });
+
+    await write("aggregation.done", {
+      consensus: response.consensus,
+      agreement: response.agreement,
+      total_ms: response.totalDurationMs,
+    });
+    await write("done", {
+      consensus: response.consensus,
+      jurors_responded: validContents.length,
+      agreement: response.agreement,
+      total_ms: response.totalDurationMs,
+    });
+    await writer.close();
   } catch (err) {
-    telemetry.emit(buildInferenceEvent({
-      event_type: "jury_aggregate",
-      model: MLX_MODEL,
-      machine: aggregatorMachine,
-      provider: "mlx",
-      route_type: "jury",
-      route_pattern: "aggregate",
-      tokens_prompt: 0,
-      tokens_completion: 0,
-      duration_ms: Date.now() - aggregateStart,
-      status: "error",
-      thinking_mode: false,
-      sampler_preset: samplerPresetLabel(0.3, maxTokens),
-      extra: { jurors_responded: valid.length, jury_size: tasks.length, stream: true, total_ms: Date.now() - start, error: String(err).slice(0, 500) },
-    }));
+    if (err instanceof JuryAllFailedSentinel) {
+      // All-jurors-failed path already wrote jury.error + done + closed.
+      return;
+    }
     throw err;
   }
-  const agreement = calculateAgreement(valid.map(r => r.content));
+}
 
-  telemetry.emit(buildInferenceEvent({
-    event_type: "jury_aggregate",
-    model: MLX_MODEL,
-    machine: aggregatorMachine,
-    provider: "mlx",
-    route_type: "jury",
-    route_pattern: "aggregate",
-    tokens_prompt: 0,
-    tokens_completion: 0,
-    duration_ms: Date.now() - aggregateStart,
-    status: "success",
-    thinking_mode: false,
-    sampler_preset: samplerPresetLabel(0.3, maxTokens),
-    extra: { jurors_responded: valid.length, jury_size: tasks.length, stream: true, agreement, total_ms: Date.now() - start },
-  }));
-
-  await write("aggregation.done", { consensus, agreement, total_ms: Date.now() - start });
-  await write("done", { consensus, jurors_responded: valid.length, agreement, total_ms: Date.now() - start });
-  await writer.close();
+class JuryAllFailedSentinel extends Error {
+  constructor() {
+    super("jury:all_jurors_failed");
+    this.name = "JuryAllFailedSentinel";
+  }
 }
 
 // ── Sampler Presets ─────────────────────────────────────────────────────────
