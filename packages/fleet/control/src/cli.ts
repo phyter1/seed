@@ -19,7 +19,7 @@
 
 import { generateToken, hashToken } from "./auth";
 import { SEED_VERSION, SEED_REPO } from "./version";
-import { fetchRelease, runSelfUpdate } from "./self-update";
+import { fetchRelease, runSelfUpdate, type ReleaseInfo } from "./self-update";
 
 const DEFAULT_CONTROL_URL = "http://localhost:4310";
 
@@ -788,17 +788,26 @@ async function waitForCommandResult(
   return null;
 }
 
-async function cmdUpgrade(args: string[]) {
-  const opts = parseUpgradeArgs(args);
+interface FleetUpgradeRunOpts {
+  parallel: number;
+  timeoutMs: number;
+  machineId?: string;
+}
 
-  // Resolve target release via the GitHub API.
-  console.log(
-    `Resolving release ${opts.targetVersion ?? "latest"} from ${SEED_REPO}...`
-  );
-  const release = await fetchRelease(opts.targetVersion ?? "latest");
-  console.log(`Target: ${release.tag} (${release.version})`);
-
-  // List machines.
+/**
+ * Core of the fleet upgrade flow, shared by cmdUpgrade and cmdRelease.
+ *
+ * Prints the plan + progress, runs the two-phase upgrade (full upgrade
+ * on agent-behind machines, cli-refresh on agent-current ones), and
+ * returns the per-machine results. Does not exit the process.
+ *
+ * Returns null if the caller asked for dry-run via dryRun=true.
+ */
+async function runFleetUpgradePhases(
+  release: ReleaseInfo,
+  opts: FleetUpgradeRunOpts,
+  dryRun: boolean
+): Promise<Array<{ machineId: string; ok: boolean; message: string }> | null> {
   const machines = (await apiGet("/v1/fleet")) as FleetMachineRow[];
   let candidates = machines.filter((m) => m.connected && m.status === "accepted");
   if (opts.machineId) {
@@ -839,15 +848,14 @@ async function cmdUpgrade(args: string[]) {
     }
   }
 
-  if (opts.dryRun || (toUpgrade.length === 0 && skipped.length === 0)) {
+  if (dryRun || (toUpgrade.length === 0 && skipped.length === 0)) {
     if (toUpgrade.length === 0 && skipped.length === 0)
       console.log("\nNothing to do.");
-    return;
+    return null;
   }
 
   const results: Array<{ machineId: string; ok: boolean; message: string }> = [];
 
-  // Phase 1: full upgrade (agent + CLI) for machines whose agent is behind.
   if (toUpgrade.length > 0) {
     console.log("");
     console.log(`Upgrading ${toUpgrade.length} machine(s)...`);
@@ -862,9 +870,6 @@ async function cmdUpgrade(args: string[]) {
     }
   }
 
-  // Phase 2: cli.update-only for machines whose agent is already at target.
-  // Agent-only hosts report a skipping success; machines where the CLI is
-  // actually stale get refreshed here instead of silently drifting.
   if (skipped.length > 0) {
     console.log("");
     console.log(`Refreshing CLI on ${skipped.length} machine(s)...`);
@@ -881,6 +886,28 @@ async function cmdUpgrade(args: string[]) {
       results.push(...batchResults);
     }
   }
+
+  return results;
+}
+
+async function cmdUpgrade(args: string[]) {
+  const opts = parseUpgradeArgs(args);
+  console.log(
+    `Resolving release ${opts.targetVersion ?? "latest"} from ${SEED_REPO}...`
+  );
+  const release = await fetchRelease(opts.targetVersion ?? "latest");
+  console.log(`Target: ${release.tag} (${release.version})`);
+
+  const results = await runFleetUpgradePhases(
+    release,
+    {
+      parallel: opts.parallel,
+      timeoutMs: opts.timeoutMs,
+      machineId: opts.machineId,
+    },
+    opts.dryRun
+  );
+  if (results === null) return; // dry-run or nothing to do
 
   console.log("");
   console.log("Summary:");
@@ -975,6 +1002,223 @@ async function cmdUpgradeControlPlane(args: string[]) {
     console.log(`  ✗ ${result.output ?? "failed"}`);
     process.exit(1);
   }
+}
+
+// --- Release: one-command upgrade across all tiers ---
+
+async function fetchHealth(): Promise<{
+  status?: string;
+  uptime_ms?: number;
+  connected_machines?: number;
+} | null> {
+  try {
+    const res = await fetch(`${getControlUrl()}/health`);
+    if (!res.ok) return null;
+    return (await res.json()) as {
+      status?: string;
+      uptime_ms?: number;
+      connected_machines?: number;
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Wait for the control plane to actually restart and come back up.
+ *
+ * Reads the initial uptime, then polls until either: (a) the
+ * endpoint becomes unreachable (CP died — normal during restart), or
+ * (b) a response comes back with uptime *lower* than initial,
+ * indicating a new process. After either signal, waits for
+ * `expectConnected` machines to reconnect over WebSocket.
+ *
+ * Returns ok=true once the post-restart CP is serving with the
+ * expected connection count. Returns ok=false on timeout.
+ */
+async function waitForControlPlaneRestart(
+  timeoutMs: number,
+  expectConnected: number
+): Promise<{ ok: boolean; uptimeMs?: number; connected?: number }> {
+  const deadline = Date.now() + timeoutMs;
+  const initial = await fetchHealth();
+  const initialUptime = initial?.uptime_ms ?? 0;
+
+  // Phase A: wait for restart signal (CP goes down OR uptime drops).
+  let restarted = false;
+  while (!restarted && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 500));
+    const h = await fetchHealth();
+    if (h === null) {
+      restarted = true; // CP unreachable → restarting
+      break;
+    }
+    const up = h.uptime_ms ?? 0;
+    if (up < initialUptime) {
+      restarted = true; // new process with lower uptime
+      break;
+    }
+  }
+
+  if (!restarted) return { ok: false };
+
+  // Phase B: wait for CP to be reachable with expected reconnects.
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 500));
+    const h = await fetchHealth();
+    if (
+      h !== null &&
+      h.status === "ok" &&
+      (h.connected_machines ?? 0) >= expectConnected
+    ) {
+      return {
+        ok: true,
+        uptimeMs: h.uptime_ms,
+        connected: h.connected_machines,
+      };
+    }
+  }
+  return { ok: false };
+}
+
+async function cmdRelease(args: string[]) {
+  let version: string | undefined;
+  let cpMachine: string | undefined = process.env.SEED_CONTROL_PLANE_MACHINE;
+  let skipCp = false;
+  let dryRun = false;
+  let parallel = 3;
+  let timeoutMs = 120_000;
+  let cpLabel: string | undefined;
+  let cpForce = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--version" && args[i + 1]) version = args[++i];
+    else if (a === "--control-plane-machine" && args[i + 1]) cpMachine = args[++i];
+    else if (a === "--cp-machine" && args[i + 1]) cpMachine = args[++i];
+    else if (a === "--skip-control-plane") skipCp = true;
+    else if (a === "--dry-run") dryRun = true;
+    else if (a === "--parallel" && args[i + 1]) parallel = parseInt(args[++i], 10);
+    else if (a === "--cp-label" && args[i + 1]) cpLabel = args[++i];
+    else if (a === "--cp-force") cpForce = true;
+    else {
+      console.error(`Unknown argument: ${a}`);
+      console.error(
+        "Usage: seed fleet release --version <tag> --control-plane-machine <id>\n" +
+        "                          [--skip-control-plane] [--dry-run] [--parallel N]\n" +
+        "                          [--cp-label <label>] [--cp-force]"
+      );
+      process.exit(1);
+    }
+  }
+
+  if (!version) {
+    console.error("--version <tag> is required");
+    process.exit(1);
+  }
+  if (!skipCp && !cpMachine) {
+    console.error(
+      "--control-plane-machine <id> is required (or set SEED_CONTROL_PLANE_MACHINE env, or use --skip-control-plane)"
+    );
+    process.exit(1);
+  }
+
+  const release = await fetchRelease(version);
+  console.log(`Target: ${release.tag} (${release.version})`);
+
+  // Count currently-accepted machines so we can wait for them to
+  // reconnect after the control-plane restart.
+  const machines = (await apiGet("/v1/fleet")) as FleetMachineRow[];
+  const acceptedCount = machines.filter(
+    (m) => m.status === "accepted" && m.connected
+  ).length;
+
+  console.log("");
+  console.log("Release plan:");
+  if (!skipCp) {
+    console.log(`  1. control-plane.update on ${cpMachine} -> ${release.version}`);
+    console.log(`  2. wait for control plane health + ${acceptedCount} reconnects`);
+  } else {
+    console.log(`  1. [skipped] control plane`);
+  }
+  console.log(`  3. fleet upgrade (agents + CLIs) -> ${release.version}`);
+
+  if (dryRun) {
+    console.log("\n(dry-run; nothing dispatched)");
+    return;
+  }
+
+  // ===== Phase 1: control plane =====
+  if (!skipCp) {
+    console.log("");
+    console.log("=== Phase 1: control plane ===");
+    process.stdout.write(
+      `  ${cpMachine}: dispatching control-plane.update ${release.tag}... `
+    );
+    const params: Record<string, unknown> = { version: release.tag };
+    if (cpForce) params.force = true;
+    if (cpLabel) params.supervisor_label = cpLabel;
+
+    let dispatch: { command_id?: string };
+    try {
+      dispatch = (await apiPost(`/v1/fleet/${cpMachine}/command`, {
+        action: "control-plane.update",
+        params,
+        timeout_ms: 60_000,
+      })) as { command_id?: string };
+    } catch (err: any) {
+      console.log(`FAIL (${err?.message ?? err})`);
+      process.exit(1);
+    }
+
+    const commandId = dispatch.command_id;
+    console.log("dispatched");
+
+    process.stdout.write("  waiting for control plane restart... ");
+    const health = await waitForControlPlaneRestart(60_000, acceptedCount);
+    if (!health.ok) {
+      console.log("TIMEOUT");
+      console.error("  control plane did not restart + reconnect in 60s; aborting release");
+      process.exit(1);
+    }
+    console.log(
+      `healthy (uptime ${health.uptimeMs}ms, ${health.connected} connected)`
+    );
+
+    // Best-effort check for the command_result in the audit log now
+    // that the CP is back. Skippable if it hasn't flushed yet.
+    if (commandId) {
+      const result = await waitForCommandResult(cpMachine!, commandId, 10_000);
+      if (result) {
+        console.log(`  cp result: ${result.output ?? (result.success ? "ok" : "failed")}`);
+      }
+    }
+  }
+
+  // ===== Phase 2: agents + CLIs =====
+  console.log("");
+  console.log("=== Phase 2: agents + CLIs ===");
+  const results = await runFleetUpgradePhases(
+    release,
+    { parallel, timeoutMs },
+    false
+  );
+  if (results === null) {
+    console.log("(nothing to upgrade in phase 2)");
+    return;
+  }
+
+  console.log("");
+  console.log("Release summary:");
+  const ok = results.filter((r) => r.ok);
+  const failed = results.filter((r) => !r.ok);
+  for (const r of ok) console.log(`  ✓ ${r.machineId}: ${r.message}`);
+  for (const r of failed) console.log(`  ✗ ${r.machineId}: ${r.message}`);
+  console.log("");
+  console.log(
+    `Release ${release.tag}: ${ok.length} ok, ${failed.length} failed`
+  );
+  if (failed.length > 0) process.exit(1);
 }
 
 // --- Self-update (for the CLI binary itself) ---
@@ -1098,6 +1342,10 @@ async function main() {
       await cmdUpgradeControlPlane(args.slice(1));
       break;
 
+    case "release":
+      await cmdRelease(args.slice(1));
+      break;
+
     case "self-update":
       await cmdSelfUpdate(args.slice(1));
       break;
@@ -1142,6 +1390,11 @@ async function main() {
         "  upgrade-cp --machine <id> [--version <tag>] [--label <label>] [--force]"
       );
       console.log("                      Update the control plane binary on the host running it");
+      console.log(
+        "  release --version <tag> --control-plane-machine <id> [--skip-control-plane]"
+      );
+      console.log("          [--dry-run] [--parallel N] [--cp-label <label>] [--cp-force]");
+      console.log("                      Full-tier release: control plane → agents + CLIs");
       console.log("  self-update [--version <tag>] [--force]");
       console.log("                      Update the seed CLI binary in place");
       console.log("  version             Print CLI version");
