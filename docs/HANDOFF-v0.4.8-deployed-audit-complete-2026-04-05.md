@@ -401,3 +401,35 @@ Three diagnosis-only tasks. No source changes; one doc commit.
 
 No code commits, no test changes. One doc commit on main (the audit). This follow-up append is left **uncommitted** per the orchestrator's instruction.
 
+---
+
+## Follow-up — #46 OTLP key rename shipped (2026-04-05)
+
+**PR:** phyter1/seed#47 — https://github.com/phyter1/seed/pull/47
+**Branch:** `refactor/otlp-key-rename`
+**Commit:** `aadc1703f0decbdb549446d666b6d63a50a0f2e7`
+**CI:** all 3 gates green (fleet/control 13s, inference/router 10s, memory 9s)
+**Status:** open, awaiting orchestrator merge + coordinated router/CP deploy
+
+### Files changed (8 files, +33 / -33)
+
+| File | Sites |
+|---|---|
+| `packages/inference/router/src/telemetry.ts` | 4 (type + interface) |
+| `packages/inference/router/src/router.ts` | 10 (5 emit pairs) |
+| `packages/inference/router/src/telemetry.test.ts` | 10 (5 test pairs) |
+| `packages/inference/router/package.json` | 1 (version 1.2.0 → 1.3.0) |
+| `packages/fleet/control/src/normalizer.ts` | 2 (getIntAttr keys) |
+| `packages/fleet/control/src/telemetry.test.ts` | 2 |
+| `packages/fleet/control/src/server-telemetry.test.ts` | 2 |
+| `docs/ORCHESTRATOR-PROMPT.md` | 2 (example schema) |
+
+### Deploy coordination
+
+**Router and control-plane must deploy together — deploy both or neither.** The normalizer defaults missing attribute keys to 0, so a staggered deploy silently zeroes token counts: either the new router emits keys the old normalizer ignores, or the new normalizer looks for keys the old router doesn't emit. Either direction produces zeroed-out usage metrics with no error surfaced.
+
+### Surprises / deferrals
+
+- None. Grep catalog matched #46 exactly (7 catalog sites + 7 test/doc sites). No additional consumers outside queue/db.ts (explicitly out of scope).
+- `packages/inference/queue/src/db.ts` still has `tokens_prompt`/`tokens_completion` SQLite columns — different product, untouched per scope.
+
