@@ -433,8 +433,14 @@ export interface WorkloadManifest {
   description?: string;
   platform: "darwin" | "linux";
   arch: "arm64" | "x64";
-  /** Relative path inside the tarball to the main executable. */
-  binary: string;
+  /** Workload kind. "service" (default) = an installed long-running
+   *  process with a supervisor. "static" = files deposited on disk,
+   *  no supervisor, no binary — the install phase is the whole
+   *  lifecycle. Omit for "service" (back-compat). */
+  kind?: "service" | "static";
+  /** Relative path inside the tarball to the main executable. Required
+   *  for "service" workloads, ignored for "static". */
+  binary?: string;
   /** Non-executable files that must land alongside the binary. */
   sidecars?: Array<{ src: string; dest_rel: string }>;
   /** Env vars rendered into the supervisor spec. Values may reference
@@ -445,7 +451,9 @@ export interface WorkloadManifest {
   /** Port the workload listens on (used for discovery + health probes). */
   port?: number;
   probe?: { type: "http" | "tcp"; path?: string };
-  supervisor: {
+  /** Supervisor spec — required for "service" workloads, omitted for
+   *  "static" workloads (no process to supervise). */
+  supervisor?: {
     launchd?: {
       label: string;
       template: string;
@@ -458,6 +466,16 @@ export interface WorkloadManifest {
   };
   /** sha256 hex digests, keyed by tarball-relative path. */
   checksums?: Record<string, string>;
+}
+
+/**
+ * True if the manifest describes a "static" (file-drop) workload —
+ * one that deposits files on disk and has no long-running process.
+ * Static workloads update the `${workloadId}-current` symlink to
+ * their install dir so consumers can read from a stable path.
+ */
+export function isStaticWorkload(m: WorkloadManifest): boolean {
+  return m.kind === "static";
 }
 
 /**

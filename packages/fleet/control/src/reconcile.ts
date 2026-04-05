@@ -70,6 +70,9 @@ export function planReconcile(inputs: ReconcileInputs): ReconcileAction[] {
     }
 
     // Version matches. Is the supervisor actually running it?
+    // Static workloads have no supervisor (empty supervisor_label),
+    // so there is nothing to drift — skip the check.
+    if (existing.supervisor_label === "") continue;
     if (!inputs.loadedLabels.has(existing.supervisor_label)) {
       actions.push({
         kind: "reload",

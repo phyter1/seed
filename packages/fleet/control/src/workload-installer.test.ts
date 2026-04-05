@@ -14,6 +14,7 @@ import {
   pruneArtifactTarballs,
   sweepTmpOrphans,
   gcWorkload,
+  updateCurrentSymlink,
 } from "./workload-installer";
 import type { WorkloadManifest, WorkloadDeclaration } from "./types";
 import type { SupervisorDriver } from "./supervisors/launchd";
@@ -29,11 +30,11 @@ function buildFakeArtifact(stageDir: string, manifest: WorkloadManifest): string
 
   // Fake binary — just an exec-able script that echoes.
   const binaryContent = "#!/bin/sh\necho fake workload\n";
-  writeFileSync(join(stageDir, manifest.binary), binaryContent, { mode: 0o755 });
+  writeFileSync(join(stageDir, manifest.binary!), binaryContent, { mode: 0o755 });
 
   // Fake launchd template with every token the installer renders.
   writeFileSync(
-    join(stageDir, manifest.supervisor.launchd!.template),
+    join(stageDir, manifest.supervisor!.launchd!.template),
     `<?xml version="1.0" encoding="UTF-8"?>
 <plist><dict>
 <key>Label</key><string>@@LABEL@@</string>
@@ -760,5 +761,234 @@ describe("gcWorkload", () => {
     expect(report.artifacts.removed).toEqual([]);
     expect(report.tmpOrphans.removed).toEqual([]);
     expect(report.bytesFreed).toBe(0);
+  });
+});
+
+describe("updateCurrentSymlink", () => {
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "seed-symlink-"));
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("creates symlink when absent, pointing at ${id}-${version}", () => {
+    const { lstatSync, readlinkSync } = require("node:fs");
+    mkdirSync(join(root, "memory-0.4.9"), { recursive: true });
+    updateCurrentSymlink(root, "memory", "0.4.9");
+    const linkPath = join(root, "memory-current");
+    const st = lstatSync(linkPath);
+    expect(st.isSymbolicLink()).toBe(true);
+    expect(readlinkSync(linkPath)).toBe("memory-0.4.9");
+  });
+
+  test("atomically updates an existing symlink to a new version", () => {
+    const { readlinkSync } = require("node:fs");
+    mkdirSync(join(root, "memory-0.4.8"), { recursive: true });
+    mkdirSync(join(root, "memory-0.4.9"), { recursive: true });
+    updateCurrentSymlink(root, "memory", "0.4.8");
+    expect(readlinkSync(join(root, "memory-current"))).toBe("memory-0.4.8");
+    updateCurrentSymlink(root, "memory", "0.4.9");
+    expect(readlinkSync(join(root, "memory-current"))).toBe("memory-0.4.9");
+  });
+
+  test("different workloads get different symlinks", () => {
+    const { readlinkSync } = require("node:fs");
+    mkdirSync(join(root, "memory-0.4.9"), { recursive: true });
+    mkdirSync(join(root, "fleet-router-1.0.0"), { recursive: true });
+    updateCurrentSymlink(root, "memory", "0.4.9");
+    updateCurrentSymlink(root, "fleet-router", "1.0.0");
+    expect(readlinkSync(join(root, "memory-current"))).toBe("memory-0.4.9");
+    expect(readlinkSync(join(root, "fleet-router-current"))).toBe("fleet-router-1.0.0");
+  });
+
+  test("no-op on non-existent installRoot", () => {
+    rmSync(root, { recursive: true, force: true });
+    expect(() =>
+      updateCurrentSymlink(root, "memory", "0.4.9")
+    ).not.toThrow();
+  });
+
+  test("resolves to version dir content through the symlink", () => {
+    mkdirSync(join(root, "config-0.1.0"), { recursive: true });
+    writeFileSync(join(root, "config-0.1.0", "data.json"), '{"v":1}');
+    updateCurrentSymlink(root, "config", "0.1.0");
+    const body = readFileSync(join(root, "config-current", "data.json"), "utf-8");
+    expect(body).toBe('{"v":1}');
+  });
+
+  test("cleans up a stale .tmp link from a prior crash", () => {
+    const { symlinkSync, lstatSync } = require("node:fs");
+    mkdirSync(join(root, "memory-0.4.9"), { recursive: true });
+    // simulate a crashed prior update
+    symlinkSync("memory-0.4.7", join(root, "memory-current.tmp"));
+    updateCurrentSymlink(root, "memory", "0.4.9");
+    // .tmp must be gone, real link points at the new version
+    expect(() => lstatSync(join(root, "memory-current.tmp"))).toThrow();
+    expect(lstatSync(join(root, "memory-current")).isSymbolicLink()).toBe(true);
+  });
+});
+
+describe("installWorkload static (file-drop) workloads", () => {
+  let tmp: string;
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "seed-static-install-"));
+  });
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const buildStaticArtifact = (stageDir: string, manifest: WorkloadManifest): string => {
+    mkdirSync(stageDir, { recursive: true });
+    writeFileSync(join(stageDir, "config.json"), '{"providers":[]}');
+    writeFileSync(join(stageDir, "manifest.json"), JSON.stringify(manifest, null, 2));
+    const tarball = join(stageDir, "..", "static.tar.gz");
+    const proc = Bun.spawnSync(["tar", "-czf", tarball, "-C", stageDir, "."]);
+    if (proc.exitCode !== 0) throw new Error("tar failed");
+    return tarball;
+  };
+
+  test("extracts files, skips supervisor, records state=installed", async () => {
+    const stageDir = join(tmp, "stage");
+    const manifest: WorkloadManifest = {
+      id: "fleet-topology",
+      version: "0.1.0",
+      kind: "static",
+      platform: "darwin",
+      arch: "arm64",
+    };
+    const tarball = buildStaticArtifact(stageDir, manifest);
+    const decl: WorkloadDeclaration = {
+      id: "fleet-topology",
+      version: "0.1.0",
+      artifact_url: `file://${tarball}`,
+    };
+
+    const driver = mockDriver();
+    const installRoot = join(tmp, "installs");
+    const result = await installWorkload(decl, {
+      driver,
+      installRoot,
+      plistDir: join(tmp, "plists"),
+      logDir: join(tmp, "logs"),
+    });
+
+    expect(result.record.state).toBe("installed");
+    expect(result.record.supervisor_label).toBe("");
+    expect(result.plistPath).toBe("");
+    // File is on disk
+    expect(existsSync(join(result.record.install_dir, "config.json"))).toBe(true);
+    // Driver was NOT asked to load/unload anything
+    expect(driver.calls).toEqual([]);
+  });
+
+  test("maintains ${id}-current symlink after install", async () => {
+    const { readlinkSync } = require("node:fs");
+    const stageDir = join(tmp, "stage");
+    const manifest: WorkloadManifest = {
+      id: "fleet-topology",
+      version: "0.1.0",
+      kind: "static",
+      platform: "darwin",
+      arch: "arm64",
+    };
+    const tarball = buildStaticArtifact(stageDir, manifest);
+    const decl: WorkloadDeclaration = {
+      id: "fleet-topology",
+      version: "0.1.0",
+      artifact_url: `file://${tarball}`,
+    };
+
+    const installRoot = join(tmp, "installs");
+    await installWorkload(decl, {
+      driver: mockDriver(),
+      installRoot,
+      plistDir: join(tmp, "plists"),
+      logDir: join(tmp, "logs"),
+    });
+
+    const linkPath = join(installRoot, "fleet-topology-current");
+    expect(readlinkSync(linkPath)).toBe("fleet-topology-0.1.0");
+    // Read through the symlink
+    const body = readFileSync(join(linkPath, "config.json"), "utf-8");
+    expect(body).toBe('{"providers":[]}');
+  });
+
+  test("second static install updates the symlink to the new version", async () => {
+    const { readlinkSync } = require("node:fs");
+    const installRoot = join(tmp, "installs");
+
+    for (const version of ["0.1.0", "0.2.0"]) {
+      const stageDir = join(tmp, `stage-${version}`);
+      const manifest: WorkloadManifest = {
+        id: "fleet-topology",
+        version,
+        kind: "static",
+        platform: "darwin",
+        arch: "arm64",
+      };
+      const tarball = buildStaticArtifact(stageDir, manifest);
+      await installWorkload(
+        {
+          id: "fleet-topology",
+          version,
+          artifact_url: `file://${tarball}`,
+        },
+        {
+          driver: mockDriver(),
+          installRoot,
+          plistDir: join(tmp, "plists"),
+          logDir: join(tmp, "logs"),
+          keepPrior: 1,
+        }
+      );
+    }
+
+    expect(readlinkSync(join(installRoot, "fleet-topology-current"))).toBe(
+      "fleet-topology-0.2.0"
+    );
+  });
+});
+
+describe("installWorkload service workloads maintain current symlink", () => {
+  let tmp: string;
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "seed-svc-symlink-"));
+  });
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("symlink points at version dir after successful service install", async () => {
+    const { readlinkSync } = require("node:fs");
+    const stageDir = join(tmp, "stage");
+    const manifest: WorkloadManifest = {
+      id: "test-workload",
+      version: "0.1.0",
+      platform: "darwin",
+      arch: "arm64",
+      binary: "bin/worker",
+      supervisor: {
+        launchd: { label: "com.test.worker", template: "templates/launchd.plist.template" },
+      },
+    };
+    const tarball = buildFakeArtifact(stageDir, manifest);
+    const driver = mockDriver();
+    const installRoot = join(tmp, "installs");
+
+    await installWorkload(
+      { id: "test-workload", version: "0.1.0", artifact_url: `file://${tarball}` },
+      {
+        driver,
+        installRoot,
+        plistDir: join(tmp, "plists"),
+        logDir: join(tmp, "logs"),
+      }
+    );
+
+    expect(readlinkSync(join(installRoot, "test-workload-current"))).toBe(
+      "test-workload-0.1.0"
+    );
   });
 });

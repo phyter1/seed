@@ -75,6 +75,11 @@ for target in $TARGETS; do
   chmod +x "$stage/bin/fleet-router"
   cp "$PKG_DIR/src/start-mlx-server.py" "$stage/bin/start-mlx-server.py"
   cp "$PKG_DIR/workload/launchd.plist.template" "$stage/templates/launchd.plist.template"
+  # Fallback copy of seed.config.json so a router install can still boot
+  # before fleet-topology is installed on a given machine. The manifest
+  # env points SEED_CONFIG at the fleet-topology-current symlink; when
+  # that path doesn't exist yet, the router's loadRouterConfig() falls
+  # through to the legacy in-install-dir path (see router/src/config.ts).
   cp "$SEED_CONFIG_SRC" "$stage/seed.config.json"
 
   bin_sha=$(shasum -a 256 "$stage/bin/fleet-router" | awk '{print $1}')
@@ -99,7 +104,8 @@ for target in $TARGETS; do
     "MLX_MODEL": "mlx-community/Qwen3.5-9B-MLX-4bit",
     "MLX_PYTHON_PATH": "/opt/homebrew/bin/python3.11",
     "MLX_STARTER_PATH": "{{install_dir}}/bin/start-mlx-server.py",
-    "SEED_CONFIG": "{{install_dir}}/seed.config.json",
+    "SEED_CONFIG": "{{install_root}}/fleet-topology-current/seed.config.json",
+    "SEED_CONFIG_FALLBACK": "{{install_dir}}/seed.config.json",
     "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   },
   "required_env": [],

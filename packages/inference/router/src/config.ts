@@ -293,10 +293,22 @@ function loadFromEnvOnly(): LoadedRouterConfig {
 
 export function loadRouterConfig(): LoadedRouterConfig {
   const seedConfigPath = process.env.SEED_CONFIG ?? resolve(import.meta.dir, "..", "..", "..", "..", "seed.config.json");
+  // Set by the router workload manifest to the in-install-dir copy
+  // that ships with the router tarball. Used when SEED_CONFIG points
+  // at the fleet-topology-current symlink but fleet-topology has not
+  // been installed on this machine yet.
+  const fallbackConfigPath = process.env.SEED_CONFIG_FALLBACK;
   const legacyConfigPath = process.env.FLEET_CONFIG ?? resolve(import.meta.dir, "..", "fleet.config.json");
 
   if (existsSync(seedConfigPath)) {
     return loadFromSeedConfig(seedConfigPath);
+  }
+
+  if (fallbackConfigPath && existsSync(fallbackConfigPath)) {
+    console.warn(
+      `[router] SEED_CONFIG ${seedConfigPath} not found; falling back to ${fallbackConfigPath}`
+    );
+    return loadFromSeedConfig(fallbackConfigPath);
   }
 
   if (existsSync(legacyConfigPath)) {
