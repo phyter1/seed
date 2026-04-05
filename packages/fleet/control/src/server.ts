@@ -517,6 +517,132 @@ export function createApp(state: ControlPlaneState): Hono {
     return c.json(entry);
   });
 
+  // --- Workloads ---
+  // Workloads are declared inline on each machine's config under the
+  // `workloads` field of the MachineConfig. These endpoints let
+  // operators read/write the declarations without hand-crafting the
+  // full MachineConfig on every change.
+
+  app.get("/v1/workloads", (c) => {
+    const entries = db.getAllConfig();
+    const result: Record<string, unknown[]> = {};
+    for (const e of entries) {
+      const m = /^machines\.(.+)$/.exec(e.key);
+      if (!m) continue;
+      const value = e.value as { workloads?: unknown[] } | null;
+      const workloads = Array.isArray(value?.workloads) ? value!.workloads! : [];
+      if (workloads.length > 0) result[m[1]] = workloads;
+    }
+    return c.json({ workloads: result });
+  });
+
+  app.get("/v1/workloads/:machine_id", (c) => {
+    const machineId = c.req.param("machine_id");
+    const entry = db.getConfig(`machines.${machineId}`);
+    const value = entry?.value as { workloads?: unknown[] } | null;
+    const workloads = Array.isArray(value?.workloads) ? value!.workloads! : [];
+    return c.json({ machine_id: machineId, workloads });
+  });
+
+  app.put("/v1/workloads/:machine_id", async (c) => {
+    const machineId = c.req.param("machine_id");
+    let body: any;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON" }, 400);
+    }
+    const workloads = body?.workloads;
+    if (!Array.isArray(workloads)) {
+      return c.json({ error: "workloads[] required" }, 400);
+    }
+    // Shallow validation — every entry must have id, version, artifact_url.
+    for (const w of workloads) {
+      if (
+        typeof w?.id !== "string" ||
+        typeof w?.version !== "string" ||
+        typeof w?.artifact_url !== "string"
+      ) {
+        return c.json(
+          { error: "each workload needs id, version, artifact_url" },
+          400
+        );
+      }
+    }
+
+    // Merge into existing machines.<id> config (preserve services,
+    // models, repos if present).
+    const existing = db.getConfig(`machines.${machineId}`);
+    const base = (existing?.value as any) ?? {
+      services: [],
+      models: [],
+      repos: [],
+    };
+    const updated = { ...base, workloads };
+    const entry = db.setConfig(`machines.${machineId}`, updated, "operator");
+
+    db.audit({
+      event_type: "config_change",
+      issued_by: "operator",
+      action: `workloads.set.${machineId}`,
+      result: "success",
+      details: JSON.stringify({
+        count: workloads.length,
+        ids: workloads.map((w: any) => w.id),
+      }),
+    });
+
+    // If the machine is connected, push the updated config immediately.
+    const conn = state.connections.get(machineId);
+    if (conn) {
+      conn.ws.send(
+        JSON.stringify({
+          type: "config_update",
+          version: entry.version,
+          config: updated,
+        })
+      );
+    }
+
+    return c.json({
+      machine_id: machineId,
+      workloads,
+      config_version: entry.version,
+      pushed: !!conn,
+    });
+  });
+
+  app.post("/v1/workloads/:machine_id/:workload_id/install", async (c) => {
+    const machineId = c.req.param("machine_id");
+    const workloadId = c.req.param("workload_id");
+    const conn = state.connections.get(machineId);
+    if (!conn) return c.json({ error: "machine not connected" }, 503);
+
+    const commandId = crypto.randomUUID();
+    conn.ws.send(
+      JSON.stringify({
+        type: "command",
+        command_id: commandId,
+        timestamp: new Date().toISOString(),
+        target: machineId,
+        action: "workload.install",
+        params: { workload_id: workloadId },
+        timeout_ms: 300_000,
+        issued_by: "operator",
+      })
+    );
+    db.audit({
+      event_type: "command",
+      machine_id: machineId,
+      issued_by: "operator",
+      action: "workload.install",
+      params: { workload_id: workloadId } as any,
+      result: "dispatched",
+      command_id: commandId,
+    });
+    return c.json({ command_id: commandId, status: "dispatched" });
+  });
+
   app.get("/v1/config/export", (c) => {
     const entries = db.getAllConfig();
     const config: Record<string, unknown> = {};

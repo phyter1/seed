@@ -219,6 +219,12 @@ export interface MachineConfig {
   services: ServiceConfig[];
   models: ModelConfig[];
   repos: RepoConfig[];
+  /**
+   * Workloads declared for this machine. The agent's convergence
+   * loop installs each one and reports status back via health
+   * reports. See docs/workloads-design.md.
+   */
+  workloads?: WorkloadDeclaration[];
 }
 
 // --- Config Store ---
@@ -395,9 +401,96 @@ export const ACTION_WHITELIST = [
   "repo.pull",
   "agent.update",
   "agent.restart",
+  "workload.install",
+  "workload.reload",
+  "workload.remove",
+  "workload.status",
+  "workload.reconcile",
 ] as const;
 
 export type ActionName = (typeof ACTION_WHITELIST)[number];
+
+// --- Workloads ---
+
+/**
+ * A workload manifest declares the shape of an installable, supervised
+ * long-running process. It ships inside an artifact tarball as
+ * `manifest.json` and tells the agent's installer what to extract,
+ * what to render, and how to start the resulting process.
+ */
+export interface WorkloadManifest {
+  id: string;
+  version: string;
+  description?: string;
+  platform: "darwin" | "linux";
+  arch: "arm64" | "x64";
+  /** Relative path inside the tarball to the main executable. */
+  binary: string;
+  /** Non-executable files that must land alongside the binary. */
+  sidecars?: Array<{ src: string; dest_rel: string }>;
+  /** Env vars rendered into the supervisor spec. Values may reference
+   *  tokens like {{install_dir}} which the installer resolves. */
+  env?: Record<string, string>;
+  /** Env keys the operator must supply in the declaration. */
+  required_env?: string[];
+  /** Port the workload listens on (used for discovery + health probes). */
+  port?: number;
+  probe?: { type: "http" | "tcp"; path?: string };
+  supervisor: {
+    launchd?: {
+      label: string;
+      template: string;
+      log_path_rel?: string;
+    };
+    systemd?: {
+      unit: string;
+      template: string;
+    };
+  };
+  /** sha256 hex digests, keyed by tarball-relative path. */
+  checksums?: Record<string, string>;
+}
+
+/**
+ * Operator declaration pinning a workload to a machine. Stored in the
+ * control-plane config under the `workloads.<machine_id>` key (as an
+ * array of declarations — a machine can host multiple workloads).
+ */
+export interface WorkloadDeclaration {
+  id: string;
+  version: string;
+  /** Where the agent should fetch the artifact tarball from. Phase 1
+   *  supports file:// URLs. Phase 2 adds https:// (GitHub Releases). */
+  artifact_url: string;
+  /** Operator-supplied env values (override manifest.env defaults). */
+  env?: Record<string, string>;
+  depends_on?: string[];
+}
+
+export type WorkloadInstallStatus =
+  | "pending"
+  | "installed"
+  | "loaded"
+  | "running"
+  | "install_failed"
+  | "drift"
+  | "removed";
+
+/**
+ * Agent-local record of an installed workload. Tracked in the agent's
+ * own SQLite store (workloads.db), not the control-plane DB.
+ */
+export interface WorkloadInstallRecord {
+  workload_id: string;
+  version: string;
+  install_dir: string;
+  supervisor_label: string;
+  installed_at: string;
+  state: WorkloadInstallStatus;
+  failure_reason: string | null;
+  last_probe_at: string | null;
+  last_probe_tier: HealthTier | null;
+}
 
 // --- Agent Config File ---
 
