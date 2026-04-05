@@ -68,6 +68,43 @@ check_tool() {
   fi
 }
 
+HOST_PROBE_MODE="${SEED_HOST_PROBE:-passive}"
+
+check_host_runtime() {
+  local command="$1"
+  local probe_cmd="$2"
+  local version=""
+  local status="missing"
+  local reason="command not found on PATH"
+
+  if ! command -v "$command" >/dev/null 2>&1; then
+    echo "missing|||$reason"
+    return 1
+  fi
+
+  if version=$("$command" --version 2>/dev/null | head -1); then
+    version="${version:-installed}"
+  else
+    status="unavailable"
+    reason="version probe failed"
+    echo "$status|$version||$reason"
+    return 0
+  fi
+
+  if [ "$HOST_PROBE_MODE" = "active" ] && [ -n "$probe_cmd" ]; then
+    if ! bash -lc "$probe_cmd" >/tmp/seed-host-probe.log 2>&1; then
+      status="unavailable"
+      reason="$(head -1 /tmp/seed-host-probe.log | tr '|' '/' | tr -d '\r')"
+      reason="${reason:-active readiness probe failed}"
+      echo "$status|$version||$reason"
+      return 0
+    fi
+  fi
+
+  echo "ready|$version||"
+  return 0
+}
+
 HAS_GIT=false; check_tool git && HAS_GIT=true
 HAS_NODE=false; check_tool node && HAS_NODE=true
 HAS_BUN=false; check_tool bun && HAS_BUN=true
@@ -77,16 +114,39 @@ HAS_OLLAMA=false; check_tool ollama && HAS_OLLAMA=true
 echo ""
 echo "Checking host runtimes..."
 
-HAS_CLAUDE=false; check_tool claude && HAS_CLAUDE=true
-HAS_CODEX=false; check_tool codex && HAS_CODEX=true
-HAS_GEMINI=false; check_tool gemini && HAS_GEMINI=true
+IFS='|' read -r CLAUDE_STATUS CLAUDE_VERSION _ CLAUDE_REASON <<< "$(check_host_runtime claude "claude -p 'Reply with OK only.' --output-format json")"
+IFS='|' read -r CODEX_STATUS CODEX_VERSION _ CODEX_REASON <<< "$(check_host_runtime codex "codex exec 'Reply with OK only.' --json")"
+IFS='|' read -r GEMINI_STATUS GEMINI_VERSION _ GEMINI_REASON <<< "$(check_host_runtime gemini "gemini -p 'Reply with OK only.' --output-format json")"
+
+print_host_status() {
+  local name="$1"
+  local status="$2"
+  local version="$3"
+  local reason="$4"
+
+  if [ "$status" = "ready" ]; then
+    echo "  ✓ $name (${version:-ready})"
+  elif [ "$status" = "unavailable" ]; then
+    echo "  ! $name (${version:-installed}; unavailable${reason:+: $reason})"
+  else
+    echo "  ✗ $name (${reason:-not found})"
+  fi
+}
+
+print_host_status claude "$CLAUDE_STATUS" "$CLAUDE_VERSION" "$CLAUDE_REASON"
+print_host_status codex "$CODEX_STATUS" "$CODEX_VERSION" "$CODEX_REASON"
+print_host_status gemini "$GEMINI_STATUS" "$GEMINI_VERSION" "$GEMINI_REASON"
+
+HAS_CLAUDE=false; [ "$CLAUDE_STATUS" != "missing" ] && HAS_CLAUDE=true
+HAS_CODEX=false; [ "$CODEX_STATUS" != "missing" ] && HAS_CODEX=true
+HAS_GEMINI=false; [ "$GEMINI_STATUS" != "missing" ] && HAS_GEMINI=true
 
 DEFAULT_HOST="none"
-if [ "$HAS_CLAUDE" = true ]; then
+if [ "$CLAUDE_STATUS" = "ready" ]; then
   DEFAULT_HOST="claude"
-elif [ "$HAS_CODEX" = true ]; then
+elif [ "$CODEX_STATUS" = "ready" ]; then
   DEFAULT_HOST="codex"
-elif [ "$HAS_GEMINI" = true ]; then
+elif [ "$GEMINI_STATUS" = "ready" ]; then
   DEFAULT_HOST="gemini"
 fi
 
@@ -158,6 +218,21 @@ config = {
             'claude': $( [ "$HAS_CLAUDE" = true ] && echo "true" || echo "false" ),
             'codex': $( [ "$HAS_CODEX" = true ] && echo "true" || echo "false" ),
             'gemini': $( [ "$HAS_GEMINI" = true ] && echo "true" || echo "false" ),
+        },
+        'status': {
+            'claude': '$CLAUDE_STATUS',
+            'codex': '$CODEX_STATUS',
+            'gemini': '$GEMINI_STATUS',
+        },
+        'versions': {
+            'claude': '''$CLAUDE_VERSION''',
+            'codex': '''$CODEX_VERSION''',
+            'gemini': '''$GEMINI_VERSION''',
+        },
+        'reasons': {
+            'claude': '''$CLAUDE_REASON''',
+            'codex': '''$CODEX_REASON''',
+            'gemini': '''$GEMINI_REASON''',
         }
     },
     'inference': {
@@ -186,8 +261,8 @@ if [ -n "$MISSING" ]; then
   echo "Missing required tools:$MISSING"
   echo "Run: bash setup/install.sh"
 elif [ "$DEFAULT_HOST" = "none" ]; then
-  echo "No supported host runtime is installed."
-  echo "Install at least one of: Claude Code, Codex CLI, Gemini CLI"
+  echo "No supported host runtime is ready."
+  echo "Install or repair at least one of: Claude Code, Codex CLI, Gemini CLI"
   echo "Run: bash setup/install.sh"
 else
   echo "All required tools present."

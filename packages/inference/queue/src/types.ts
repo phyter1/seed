@@ -99,6 +99,8 @@ export interface WorkerRegistration {
   capability: Capability;
   /** Where this worker runs: "local" (on-network) or "cloud" (external API) */
   locality: Locality;
+  provider_id: string | null;
+  default_model: string | null;
   hostname: string;
   endpoint: string;
   last_heartbeat: string;

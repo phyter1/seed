@@ -62,9 +62,18 @@ Benefits:
 - Stable hostname survives infrastructure changes
 - Already using Cloudflare for DNS
 
-### 8. The control plane should be containerized
+### 8. The control plane runs natively via launchd
 
-Docker image so it can run anywhere — on a fleet machine, on a VPS, on EC2. The agent daemon runs natively (it needs access to local services like Ollama, launchd, etc.).
+Originally designed as a Docker container for portability. Decided to run natively via launchd instead — Docker adds unnecessary overhead (filesystem isolation, network bridge, daemon) for a 3-machine fleet where the deployment target is a specific Mac anyway.
+
+The Dockerfile stays in the repo for future use (cloud deployment, other users), but the default deployment for our fleet is:
+
+- `bun run packages/fleet/control/src/main.ts` under a launchd LaunchAgent (`com.seed.control-plane.plist`)
+- Same pattern as the machine agent
+- Data stored in `~/.local/share/seed-fleet/control.db`
+- Logs to `~/Library/Logs/seed-control-plane.log`
+
+Cloudflare Tunnel still fronts the native process, same as it would front a container.
 
 ---
 
@@ -102,7 +111,56 @@ Every command dispatched, every config change, every machine join/leave. Written
 
 The adversarial review independently confirmed this: "Do not couple them. The control plane's uptime requirement is 'best effort.' The queue's uptime requirement is 'every inference request must be served.' These are different SLAs."
 
-### 16. Observatory folds into the control plane
+### 16. Ren 2 hosts the control plane
+
+The control plane runs on **ren2** (Intel i9, 32GB). Rationale:
+
+- Ren 2 is the least loaded machine (only runs 2 queue workers)
+- Separates failure domains from the heartbeat host (ren1)
+- Clean role split across the fleet:
+  - **ren1** — identity/heartbeat/queue server (macOS)
+  - **ren2** — control plane/observability (macOS)
+  - **ren3** — MLX inference router (macOS, Apple Silicon)
+  - **ren4** — GPU inference worker / large model host (Linux, RTX 3090)
+- Ren 1 was considered but already carries heartbeat + queue server + memory agent
+- Ren 3 was considered but has the smallest RAM (16GB, tight with MLX) and is the router host
+
+The control plane will eventually be fronted by a Cloudflare Tunnel so fleet machines can connect from anywhere via a stable hostname (e.g., `control.phytertek.com`), regardless of which machine runs the container.
+
+### 17. Ren 4 — Linux GPU inference node
+
+New machine being added to the fleet:
+
+- **Hardware:** AMD 16c/32t, 64GB RAM, NVIDIA RTX 3090 (24GB VRAM)
+- **OS:** Ubuntu 24.04 LTS Server (headless)
+- **Location:** Same LAN as ren1/ren2/ren3
+- **Role:** GPU inference + general compute (not replacing any existing machine)
+
+Why Ubuntu 24.04 LTS:
+- Best-tested NVIDIA driver support (535+ for CUDA 12.x)
+- Ollama's official installer targets Ubuntu primarily
+- 5-year support (April 2029)
+- First-class NVIDIA apt repos
+
+**Inference capabilities:**
+- Can run 70B models at Q4 (Llama 3.3 70B, Qwen 2.5 72B)
+- Or serve multiple smaller models concurrently
+- Potentially becomes a vLLM/SGLang backend for higher throughput than Ollama
+- Could eventually host a larger fleet router model (currently Qwen3.5-9B on ren3)
+
+### 18. Linux support in Seed
+
+With ren4 joining the fleet, Seed needs first-class Linux support:
+
+- **Binary targets:** `bun-linux-x64` added to the build matrix alongside `bun-darwin-{arm64,x64}`
+- **Service management:** systemd unit templates alongside launchd plists
+- **Install paths:** `/usr/local/bin/` for binaries, `/etc/systemd/system/` for system-scoped services (headless server, should start on boot regardless of login)
+- **Detection:** `setup/detect-agent.sh` gets Linux branches (`/proc/cpuinfo`, `/proc/meminfo`, NVIDIA GPU detection via `nvidia-smi`)
+- **Service probes:** agent's probes need Linux-equivalent checks (systemctl status, process detection via `/proc`)
+- **No MLX:** Apple-only, the Linux build skips it entirely
+- **GPU detection:** new capability report field (`has_nvidia_gpu`, `vram_gb`, `cuda_version`)
+
+### 19. Observatory folds into the control plane
 
 The Agent Observatory (`agent-observatory` repo, 26 epics, 112+ commits) is absorbed into Seed's control plane. They're the same concern: "what's happening across my fleet." Running two separate systems with overlapping telemetry data is the scattered infrastructure Seed exists to consolidate.
 

@@ -1,4 +1,5 @@
 export type HostId = "claude" | "codex" | "gemini";
+export type HostReadinessStatus = "ready" | "unavailable" | "missing";
 
 export type HostCapability =
   | "interactive"
@@ -10,8 +11,11 @@ export type HostCapability =
 
 export interface HostDetection {
   installed: boolean;
+  ready: boolean;
+  status: HostReadinessStatus;
   command: string;
   version?: string;
+  reason?: string;
   notes?: string[];
 }
 

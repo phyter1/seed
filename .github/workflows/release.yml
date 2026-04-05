@@ -74,6 +74,10 @@ jobs:
         working-directory: packages/memory
         run: bash scripts/build-binaries.sh
 
+      - name: Build memory workload artifact bundles
+        working-directory: packages/memory
+        run: bash scripts/build-artifact.sh --targets "${{ matrix.targets }}"
+
       - name: Collect artifacts for this family
         shell: bash
         run: |
@@ -93,13 +97,21 @@ jobs:
                 cp "$ext" "release-assets/vec0-$target.$(basename "$ext" | sed 's/vec0\.//')"
               fi
             fi
+            # Workload artifact bundle (tarball containing manifest +
+            # binary + template, self-describing for the installer).
+            mem_version=$(node -p "require('./packages/memory/package.json').version")
+            artifact="packages/memory/dist/artifacts/memory-${mem_version}-$target.tar.gz"
+            if [ -f "$artifact" ]; then
+              cp "$artifact" "release-assets/"
+            fi
           done
           # Per-family checksums file so both jobs can upload without clobbering.
-          # shasum ships with macOS; sha256sum with Linux.
+          # shasum ships with macOS; sha256sum with Linux. Cover every
+          # artifact in the release, not just seed-*.
           if command -v shasum >/dev/null 2>&1; then
-            (cd release-assets && shasum -a 256 seed-* > checksums-${{ matrix.family }}.txt)
+            (cd release-assets && shasum -a 256 seed-* vec0-* memory-*.tar.gz 2>/dev/null > checksums-${{ matrix.family }}.txt) || true
           else
-            (cd release-assets && sha256sum seed-* > checksums-${{ matrix.family }}.txt)
+            (cd release-assets && sha256sum seed-* vec0-* memory-*.tar.gz 2>/dev/null > checksums-${{ matrix.family }}.txt) || true
           fi
 
       - name: Upload artifacts

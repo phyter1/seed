@@ -42,16 +42,26 @@ function inferProviderId(config: SeedConfigFile | null, explicitProviderId: stri
   return config.models.find((model) => model.id === defaultModel)?.provider;
 }
 
-function inferDefaultModel(config: SeedConfigFile | null, providerId: string | undefined, explicitDefaultModel: string): string {
+function inferDefaultModel(
+  config: SeedConfigFile | null,
+  providerId: string | undefined,
+  explicitDefaultModel: string,
+  fallbackDefaultModel: string
+): string {
   if (explicitDefaultModel) return explicitDefaultModel;
-  if (!config?.models?.length || !providerId) return "";
-  return config.models.find((model) => model.provider === providerId)?.id ?? "";
+  if (!config?.models?.length || !providerId) return fallbackDefaultModel;
+  return config.models.find((model) => model.provider === providerId)?.id ?? fallbackDefaultModel;
 }
 
-function inferInferenceUrl(config: SeedConfigFile | null, providerId: string | undefined, explicitUrl: string): string {
+function inferInferenceUrl(
+  config: SeedConfigFile | null,
+  providerId: string | undefined,
+  explicitUrl: string,
+  fallbackUrl: string
+): string {
   if (explicitUrl) return explicitUrl;
-  if (!config?.providers || !providerId) return "";
-  return config.providers[providerId]?.base_url ?? "";
+  if (!config?.providers || !providerId) return fallbackUrl;
+  return config.providers[providerId]?.base_url ?? fallbackUrl;
 }
 
 function inferLocality(config: SeedConfigFile | null, providerId: string | undefined, explicit: string | undefined, inferenceUrl: string): Locality {
@@ -79,9 +89,21 @@ export function resolveWorkerConfig(env: NodeJS.ProcessEnv): ResolvedWorkerConfi
   const config = loadSeedConfig(seedConfigPath);
 
   const explicitProviderId = env.PROVIDER_ID ?? env.SEED_PROVIDER;
-  const defaultModel = inferDefaultModel(config, explicitProviderId, env.DEFAULT_MODEL ?? "");
+  const fallbackDefaultModel = env.FALLBACK_DEFAULT_MODEL ?? env.SEED_FALLBACK_DEFAULT_MODEL ?? "";
+  const fallbackInferenceUrl = env.FALLBACK_INFERENCE_URL ?? env.SEED_FALLBACK_INFERENCE_URL ?? "";
+  const defaultModel = inferDefaultModel(
+    config,
+    explicitProviderId,
+    env.DEFAULT_MODEL ?? "",
+    fallbackDefaultModel
+  );
   const providerId = inferProviderId(config, explicitProviderId, defaultModel);
-  const inferenceUrl = inferInferenceUrl(config, providerId, env.INFERENCE_URL ?? "");
+  const inferenceUrl = inferInferenceUrl(
+    config,
+    providerId,
+    env.INFERENCE_URL ?? "",
+    fallbackInferenceUrl
+  );
   const locality = inferLocality(config, providerId, env.LOCALITY, inferenceUrl);
 
   return {

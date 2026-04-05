@@ -28,6 +28,8 @@ export class QueueDB {
     // Add new columns to existing databases
     try { this.db.exec("ALTER TABLE jobs ADD COLUMN local_only INTEGER NOT NULL DEFAULT 0"); } catch {}
     try { this.db.exec("ALTER TABLE workers ADD COLUMN locality TEXT NOT NULL DEFAULT 'local'"); } catch {}
+    try { this.db.exec("ALTER TABLE workers ADD COLUMN provider_id TEXT"); } catch {}
+    try { this.db.exec("ALTER TABLE workers ADD COLUMN default_model TEXT"); } catch {}
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS jobs (
@@ -56,6 +58,8 @@ export class QueueDB {
         id TEXT PRIMARY KEY,
         capability TEXT NOT NULL,
         locality TEXT NOT NULL DEFAULT 'local',
+        provider_id TEXT,
+        default_model TEXT,
         hostname TEXT NOT NULL,
         endpoint TEXT NOT NULL,
         last_heartbeat TEXT NOT NULL DEFAULT (datetime('now')),
@@ -297,16 +301,20 @@ export class QueueDB {
     id: string;
     capability: Capability;
     locality?: "local" | "cloud";
+    provider_id?: string | null;
+    default_model?: string | null;
     hostname: string;
     endpoint: string;
     rate_limits?: RateLimits;
   }): WorkerRegistration {
     const stmt = this.db.prepare(`
-      INSERT INTO workers (id, capability, locality, hostname, endpoint, rate_limits)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO workers (id, capability, locality, provider_id, default_model, hostname, endpoint, rate_limits)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         capability = excluded.capability,
         locality = excluded.locality,
+        provider_id = excluded.provider_id,
+        default_model = excluded.default_model,
         hostname = excluded.hostname,
         endpoint = excluded.endpoint,
         rate_limits = excluded.rate_limits,
@@ -317,6 +325,8 @@ export class QueueDB {
       reg.id,
       reg.capability,
       reg.locality ?? "local",
+      reg.provider_id ?? null,
+      reg.default_model ?? null,
       reg.hostname,
       reg.endpoint,
       reg.rate_limits ? JSON.stringify(reg.rate_limits) : null

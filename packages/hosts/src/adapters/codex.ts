@@ -1,6 +1,8 @@
 import type { HostAdapter, HostInvocationOptions } from "../types";
 import { detectCommand } from "../utils";
 
+const activeProbeEnabled = process.env.SEED_HOST_PROBE === "active";
+
 export const codexAdapter: HostAdapter = {
   id: "codex",
   displayName: "Codex CLI",
@@ -8,13 +10,27 @@ export const codexAdapter: HostAdapter = {
   capabilities: ["interactive", "headless", "heartbeat", "mcp", "tool_permissions", "structured_output"],
 
   async detect() {
-    const detection = await detectCommand("codex");
+    const detection = await detectCommand("codex", {
+      readinessProbe: activeProbeEnabled
+        ? {
+            args: ["exec", "Reply with OK only.", "--json"],
+            timeoutMs: 20_000,
+          }
+        : undefined,
+    });
     return {
       installed: detection.installed,
+      ready: detection.ready,
+      status: detection.status,
       command: "codex",
       version: detection.version,
+      reason: detection.reason,
       notes: detection.installed
-        ? ["Codex is a host adapter, not a generic provider router.", "Use Seed runtime for non-OpenAI provider mixing."]
+        ? [
+            "Codex is a host adapter, not a generic provider router.",
+            "Use Seed runtime for non-OpenAI provider mixing.",
+            activeProbeEnabled ? "Active readiness probe enabled." : "Passive detection only; backend/auth state may still block execution.",
+          ]
         : ["Codex CLI not found on PATH."],
     };
   },

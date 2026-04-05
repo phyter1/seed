@@ -51,8 +51,13 @@ async function main() {
   const adapter = getHostAdapter(resolved.host as HostId);
   const detection = await adapter.detect();
 
-  if (!detection.installed) {
+  if (detection.status === "missing") {
     throw new Error(`Configured host "${resolved.host}" is not installed on PATH`);
+  }
+
+  if (!detection.ready) {
+    const reason = detection.reason ? `: ${detection.reason}` : "";
+    throw new Error(`Configured host "${resolved.host}" is installed but not ready${reason}`);
   }
 
   if (!adapter.capabilities.includes("heartbeat")) {

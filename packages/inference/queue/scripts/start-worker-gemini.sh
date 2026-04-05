@@ -6,11 +6,12 @@ cd "$(dirname "$0")/.."
 KEYS_FILE="${KEYS_FILE:-$HOME/.config/queue/keys.json}"
 export API_KEY=$(python3 -c "import json; print(json.load(open('$KEYS_FILE'))['gemini']['api_key'])")
 
+export PROVIDER_ID="${PROVIDER_ID:-gemini}"
 export WORKER_ID="${WORKER_ID:-gemini-cloud}"
 export CAPABILITY="${CAPABILITY:-any}"
-export INFERENCE_URL="${INFERENCE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}"
 export QUEUE_URL="${QUEUE_URL:-$(scripts/discover-queue.sh 30 5)}"
-export DEFAULT_MODEL="${DEFAULT_MODEL:-gemini-2.5-flash}"
+export FALLBACK_INFERENCE_URL="${FALLBACK_INFERENCE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}"
+export FALLBACK_DEFAULT_MODEL="${FALLBACK_DEFAULT_MODEL:-gemini-2.5-flash}"
 export POLL_INTERVAL="${POLL_INTERVAL:-5000}"
 export RATE_LIMITS="${RATE_LIMITS:-rpm=10,rpd=250,tpm=250000}"
 
