@@ -201,3 +201,26 @@ None. Diagnosis + issue updates only.
 
 **Not in scope, flagged:** The intentional-kill cycle occasionally logs `OSError: [Errno 48] Address already in use` when the new MLX child races the dying old one for port 8080. Pre-existing behavior (pkill is asynchronous from the kernel's perspective). Router's health probe/wait loop eventually wins, but a cleaner shutdown-wait before spawn would remove the log noise.
 
+---
+
+## Follow-up session 2026-04-05 — PR #37 merge + housekeeping
+
+### 1. main reconciled with origin/main ✓
+Local main had 2 unpushed doc commits (`fe6f761`, `5d84a1d`); origin had 1 (`56ac58b` harvest-skill design). Rebased local onto origin cleanly, pushed. Then discovered the PR #37 branch contained equivalent doc commits (different SHAs) that conflicted with the freshly-pushed main. Rebased `feat/mlx-supervisor-36` onto main — the two duplicate doc commits were auto-skipped as already-applied, leaving just the router supervisor code + its own handoff-doc append. Force-pushed (with lease) and squash-merged.
+
+### 2. PR #37 merged ✓
+Squash-merged as `1e8568f` on main. Branch deleted.
+
+### 3. Issue #38 filed — port 8080 EADDRINUSE race on MLX respawn
+phyter1/seed#38, labels `reliability`, `router`. Captures the pre-existing race flagged in #37's "not in scope" note: pkill is async enough that the new MLX child sometimes loses the `bind()` race to the dying old one. Log noise only today; suggested fixes are SIGKILL + `kill -0` poll or connect-probe on `:8080` before spawn. Diagnosis only, no implementation.
+
+### 4. Router README added ✓
+Created `packages/inference/router/README.md` (commit `d764490`) noting that `dist/artifacts/fleet-router-*.tar.gz` is gitignored and must be rebuilt from source via `packages/inference/router/scripts/build-artifact.sh` before a fresh install. One paragraph, no other router docs touched.
+
+### Final state
+- main at `d764490`, clean, pushed, aligned with origin
+- PR #37: MERGED
+- Issue #38: open with repro + expected behavior
+- README note: committed to main
+- Working tree clean
+
