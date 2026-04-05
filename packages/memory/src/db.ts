@@ -541,6 +541,30 @@ export class MemoryDB {
       .all() as any[];
   }
 
+  /**
+   * Child chunk rows (parent_id IS NOT NULL) that have no entry in
+   * vec_memories. These exist when chunk rows were written by an
+   * earlier memory service version that didn't commit embeddings to
+   * the vec table. The top-level /backfill path only touches parent
+   * rows, so chunks in this state are stranded until this method
+   * surfaces them.
+   */
+  chunksMissingEmbeddings(): Array<{
+    id: number;
+    summary: string;
+    raw_text: string;
+  }> {
+    if (!this.hasVec) return [];
+    return this.db
+      .prepare(
+        `SELECT m.id, m.summary, m.raw_text
+         FROM memories m
+         LEFT JOIN vec_memories v ON m.id = v.memory_id
+         WHERE v.memory_id IS NULL AND m.parent_id IS NOT NULL`
+      )
+      .all() as any[];
+  }
+
   hasChildren(parentId: number): boolean {
     const row = this.db
       .prepare("SELECT 1 FROM memories WHERE parent_id = ?")

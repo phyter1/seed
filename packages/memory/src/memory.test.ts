@@ -846,3 +846,71 @@ describe("MemoryDB.backfillOrigin", () => {
     expect(result.updated).toBe(0);
   });
 });
+
+describe("MemoryService.backfillEmbeddings (chunk path)", () => {
+  test("embeds stranded chunk rows that have no vec entry", async () => {
+    const { db, service } = makeService({});
+    // Parent with embedding + one embedded child + one stranded child.
+    const parentId = db.storeMemory({
+      raw_text: "parent body",
+      summary: "parent summary",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      embedding: Array(1024).fill(0.1),
+    });
+    const embeddedChildId = db.storeMemory({
+      raw_text: "embedded chunk",
+      summary: "chunk 1",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      parent_id: parentId,
+      embedding: Array(1024).fill(0.2),
+    });
+    const strandedChildId = db.storeMemory({
+      raw_text: "stranded chunk",
+      summary: "chunk 2",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      parent_id: parentId,
+      // no embedding — this is what an older version left behind
+    });
+
+    expect(db.hasEmbedding(parentId)).toBe(true);
+    expect(db.hasEmbedding(embeddedChildId)).toBe(true);
+    expect(db.hasEmbedding(strandedChildId)).toBe(false);
+    expect(db.chunksMissingEmbeddings().map((r) => r.id)).toEqual([strandedChildId]);
+
+    const count = await service.backfillEmbeddings();
+
+    expect(count).toBe(1);
+    expect(db.hasEmbedding(strandedChildId)).toBe(true);
+    expect(db.chunksMissingEmbeddings()).toHaveLength(0);
+  });
+
+  test("does not create duplicate embeddings for already-embedded chunks", async () => {
+    const { db, service } = makeService({});
+    const parentId = db.storeMemory({
+      raw_text: "parent",
+      summary: "parent",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      embedding: Array(1024).fill(0.1),
+    });
+    db.storeMemory({
+      raw_text: "child",
+      summary: "child",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      parent_id: parentId,
+      embedding: Array(1024).fill(0.2),
+    });
+
+    const count = await service.backfillEmbeddings();
+    expect(count).toBe(0);
+  });
+});
