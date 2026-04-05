@@ -14,6 +14,7 @@ export interface Machine {
   memory_gb: number | null;
   agent_version: string | null;
   agent_updated_at: string | null;
+  lan_ip: string | null;
   last_seen: string | null;
   last_health: HealthReport | null;
   config_version: number;
@@ -80,6 +81,11 @@ export interface AnnounceMessage {
   agent_version: string;
   config_version: number;
   capabilities: string[];
+  /** LAN IPv4 the agent reaches the control plane from. Populated by
+   *  asking the kernel which local address would egress toward the
+   *  control plane. Used for service discovery so callers don't have
+   *  to rely on mDNS (.local) or DNS resolving machine_ids. */
+  lan_ip?: string;
 }
 
 export interface HealthMessage {

@@ -45,6 +45,7 @@ export class ControlDB {
         memory_gb REAL,
         agent_version TEXT,
         agent_updated_at TEXT,
+        lan_ip TEXT,
         last_seen TEXT,
         last_health TEXT,
         config_version INTEGER DEFAULT 0,
@@ -190,6 +191,7 @@ export class ControlDB {
 
     // --- Additive migrations for pre-existing databases ---
     this.addColumnIfMissing("machines", "agent_updated_at", "TEXT");
+    this.addColumnIfMissing("machines", "lan_ip", "TEXT");
   }
 
   /**
@@ -340,6 +342,7 @@ export class ControlDB {
       memory_gb?: number;
       agent_version?: string;
       config_version?: number;
+      lan_ip?: string;
     }
   ): void {
     const sets: string[] = ["updated_at = datetime('now')", "last_seen = datetime('now')"];
@@ -373,6 +376,10 @@ export class ControlDB {
     if (info.config_version !== undefined) {
       sets.push("config_version = ?");
       params.push(info.config_version);
+    }
+    if (info.lan_ip !== undefined) {
+      sets.push("lan_ip = ?");
+      params.push(info.lan_ip);
     }
 
     params.push(id);
