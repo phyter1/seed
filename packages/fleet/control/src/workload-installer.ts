@@ -15,6 +15,7 @@ import {
   existsSync,
   rmSync,
   readdirSync,
+  statSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type {
@@ -180,6 +181,270 @@ export function pruneOldInstalls(
   return toRemove;
 }
 
+/**
+ * Recursively compute the total byte size of a file or directory tree.
+ * Follows no symlinks, tolerates missing paths (returns 0), and does
+ * not descend into paths it cannot stat.
+ */
+export function pathSize(p: string): number {
+  if (!existsSync(p)) return 0;
+  let total = 0;
+  const stack = [p];
+  while (stack.length > 0) {
+    const cur = stack.pop()!;
+    let st;
+    try {
+      st = statSync(cur);
+    } catch {
+      continue;
+    }
+    if (st.isDirectory()) {
+      let entries: string[];
+      try {
+        entries = readdirSync(cur);
+      } catch {
+        continue;
+      }
+      for (const e of entries) stack.push(join(cur, e));
+    } else if (st.isFile()) {
+      total += st.size;
+    }
+  }
+  return total;
+}
+
+/**
+ * Extract the semver version from a workload artifact tarball filename.
+ * Expected shape: `${workloadId}-${version}-${platform}-${arch}.tar.gz`.
+ * Returns null if the name doesn't match that shape.
+ */
+export function parseArtifactVersion(
+  name: string,
+  workloadId: string
+): string | null {
+  const prefix = `${workloadId}-`;
+  if (!name.startsWith(prefix) || !name.endsWith(".tar.gz")) return null;
+  const middle = name.slice(prefix.length, -".tar.gz".length);
+  // Match leading semver (e.g. "0.4.9" or "0.4.9-rc1") followed by -<platform>-<arch>
+  const m = middle.match(/^(\d+\.\d+\.\d+(?:[-+][\w.]+)?)-[\w.]+-[\w.]+$/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Prune stale pre-staged artifact tarballs from `artifactRoot`, keeping
+ * only those whose version is in `retainVersions`. Returns the list of
+ * removed filenames. Non-existent `artifactRoot` is a no-op.
+ *
+ * Matches files shaped like `${workloadId}-${semver}-${platform}-${arch}.tar.gz`.
+ * Files that don't match this shape are ignored — they belong to
+ * something else.
+ */
+export function pruneArtifactTarballs(
+  artifactRoot: string,
+  workloadId: string,
+  retainVersions: Set<string>,
+  dryRun: boolean
+): { removed: string[]; bytesFreed: number } {
+  if (!existsSync(artifactRoot)) return { removed: [], bytesFreed: 0 };
+  const removed: string[] = [];
+  let bytesFreed = 0;
+  for (const entry of readdirSync(artifactRoot, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const version = parseArtifactVersion(entry.name, workloadId);
+    if (version === null) continue;
+    if (retainVersions.has(version)) continue;
+    const full = join(artifactRoot, entry.name);
+    bytesFreed += pathSize(full);
+    if (!dryRun) rmSync(full, { force: true });
+    removed.push(entry.name);
+  }
+  return { removed, bytesFreed };
+}
+
+/**
+ * Sweep pre-v0.4 bootstrap debris from `/tmp` (or `tmpRoot`): tarballs
+ * shaped like `${workloadId}-${semver}-*.tar.gz` and seed-owned sqlite
+ * files shaped like `seed-${workloadId}-*.db` / `seed-${workloadId}-*.db-shm`
+ * / `seed-${workloadId}-*.db-wal`.
+ *
+ * Conservative — only matches files whose name starts with an expected
+ * prefix AND encodes a semver, so normal user files aren't caught.
+ * Opt-in via the GC caller (includeTmp flag).
+ */
+export function sweepTmpOrphans(
+  tmpRoot: string,
+  workloadId: string,
+  dryRun: boolean
+): { removed: string[]; bytesFreed: number } {
+  if (!existsSync(tmpRoot)) return { removed: [], bytesFreed: 0 };
+  const removed: string[] = [];
+  let bytesFreed = 0;
+  const tarPrefix = `${workloadId}-`;
+  const dbPrefix = `seed-${workloadId}-`;
+  const tarRegex = /^\d+\.\d+\.\d+(?:[-+][\w.]+)?-[\w.]+-[\w.]+\.tar\.gz$/;
+  const dbRegex = /^[\w.-]+\.db(-shm|-wal)?$/;
+  for (const entry of readdirSync(tmpRoot, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    let matches = false;
+    if (entry.name.startsWith(tarPrefix)) {
+      matches = tarRegex.test(entry.name.slice(tarPrefix.length));
+    } else if (entry.name.startsWith(dbPrefix)) {
+      matches = dbRegex.test(entry.name.slice(dbPrefix.length));
+    }
+    if (!matches) continue;
+    const full = join(tmpRoot, entry.name);
+    bytesFreed += pathSize(full);
+    if (!dryRun) rmSync(full, { force: true });
+    removed.push(entry.name);
+  }
+  return { removed, bytesFreed };
+}
+
+export interface GcWorkloadReport {
+  workloadId: string;
+  currentVersion: string | null;
+  installDirs: { removed: string[]; bytesFreed: number };
+  artifacts: { removed: string[]; bytesFreed: number };
+  tmpOrphans: { removed: string[]; bytesFreed: number };
+  bytesFreed: number;
+}
+
+export interface GcOptions {
+  /** Root directory for workload installs. Defaults to
+   *  `~/.local/share/seed/workloads`. */
+  installRoot?: string;
+  /** Root directory where pre-staged artifact tarballs live. Defaults
+   *  to `~/.local/share/seed/workload-artifacts`. */
+  artifactRoot?: string;
+  /** Directory to sweep for /tmp orphans. Defaults to `/tmp`. Only
+   *  swept when `includeTmp=true`. */
+  tmpRoot?: string;
+  /** Number of non-current install-dir versions to retain. Mirrors
+   *  InstallerOptions.keepPrior. Defaults to 1. */
+  keepPrior?: number;
+  /** If true, also sweep pre-v0.4 bootstrap debris from tmpRoot. */
+  includeTmp?: boolean;
+  /** If true, compute the report but remove nothing. */
+  dryRun?: boolean;
+}
+
+/**
+ * Garbage-collect on-disk workload state for a single workload:
+ *
+ *  1. Prune install-dirs under installRoot, keeping current + keepPrior.
+ *  2. Prune pre-staged artifact tarballs that don't match a retained
+ *     install-dir version.
+ *  3. (Opt-in) Sweep pre-v0.4 bootstrap debris from tmpRoot.
+ *
+ * `currentVersion` is the installed version per the caller's workload
+ * DB. If null, every install-dir for this workload is treated as
+ * stale (the workload is not installed here). dryRun reports what
+ * would be removed without touching disk.
+ */
+export function gcWorkload(
+  workloadId: string,
+  currentVersion: string | null,
+  opts: GcOptions = {}
+): GcWorkloadReport {
+  const installRoot = opts.installRoot ?? defaultInstallRoot();
+  const artifactRoot = opts.artifactRoot ?? defaultArtifactRoot();
+  const tmpRoot = opts.tmpRoot ?? "/tmp";
+  const keepPrior = opts.keepPrior ?? 1;
+  const dryRun = opts.dryRun ?? false;
+
+  // Determine which install-dir versions we plan to retain BEFORE
+  // pruning, so we can mirror the retention policy on artifact tarballs.
+  const installDirVersions = listInstalledVersions(installRoot, workloadId);
+  const retainedVersions = computeRetainedVersions(
+    installDirVersions,
+    currentVersion,
+    keepPrior
+  );
+
+  // --- 1. install dirs ---
+  let installDirsRemoved: string[] = [];
+  let installDirsBytes = 0;
+  for (const version of installDirVersions) {
+    if (retainedVersions.has(version)) continue;
+    const name = `${workloadId}-${version}`;
+    const full = join(installRoot, name);
+    installDirsBytes += pathSize(full);
+    if (!dryRun) rmSync(full, { recursive: true, force: true });
+    installDirsRemoved.push(name);
+  }
+
+  // --- 2. artifact tarballs ---
+  const artifacts = pruneArtifactTarballs(
+    artifactRoot,
+    workloadId,
+    retainedVersions,
+    dryRun
+  );
+
+  // --- 3. /tmp orphans (opt-in) ---
+  const tmpOrphans = opts.includeTmp
+    ? sweepTmpOrphans(tmpRoot, workloadId, dryRun)
+    : { removed: [], bytesFreed: 0 };
+
+  return {
+    workloadId,
+    currentVersion,
+    installDirs: { removed: installDirsRemoved, bytesFreed: installDirsBytes },
+    artifacts,
+    tmpOrphans,
+    bytesFreed:
+      installDirsBytes + artifacts.bytesFreed + tmpOrphans.bytesFreed,
+  };
+}
+
+/**
+ * List all installed versions of a workload under `installRoot`, by
+ * enumerating directory names matching `${workloadId}-*`. Returns
+ * bare version strings (no workloadId prefix), unsorted.
+ */
+function listInstalledVersions(
+  installRoot: string,
+  workloadId: string
+): string[] {
+  if (!existsSync(installRoot)) return [];
+  const prefix = `${workloadId}-`;
+  const versions: string[] = [];
+  for (const entry of readdirSync(installRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    if (!entry.name.startsWith(prefix)) continue;
+    versions.push(entry.name.slice(prefix.length));
+  }
+  return versions;
+}
+
+/**
+ * Determine which install-dir versions to retain: the current version
+ * (if it is present on disk) plus the `keepPrior` most-recent non-current
+ * versions by semver. When currentVersion is null, retain only the
+ * `keepPrior` most-recent versions on disk.
+ */
+function computeRetainedVersions(
+  available: string[],
+  currentVersion: string | null,
+  keepPrior: number
+): Set<string> {
+  const retain = new Set<string>();
+  if (keepPrior < 0) {
+    // Disabling retention means: retain everything (nothing gets pruned).
+    for (const v of available) retain.add(v);
+    if (currentVersion) retain.add(currentVersion);
+    return retain;
+  }
+  if (currentVersion && available.includes(currentVersion)) {
+    retain.add(currentVersion);
+  }
+  const priors = available
+    .filter((v) => v !== currentVersion)
+    .sort((a, b) => compareSemver(b, a));
+  for (const v of priors.slice(0, keepPrior)) retain.add(v);
+  return retain;
+}
+
 function homeDir(): string {
   const h = process.env.HOME;
   if (!h) throw new Error("HOME not set");
@@ -188,6 +453,10 @@ function homeDir(): string {
 
 function defaultInstallRoot(): string {
   return join(homeDir(), ".local/share/seed/workloads");
+}
+
+function defaultArtifactRoot(): string {
+  return join(homeDir(), ".local/share/seed/workload-artifacts");
 }
 
 function defaultPlistDir(): string {

@@ -9,6 +9,11 @@ import {
   installWorkload,
   pruneOldInstalls,
   compareSemver,
+  pathSize,
+  parseArtifactVersion,
+  pruneArtifactTarballs,
+  sweepTmpOrphans,
+  gcWorkload,
 } from "./workload-installer";
 import type { WorkloadManifest, WorkloadDeclaration } from "./types";
 import type { SupervisorDriver } from "./supervisors/launchd";
@@ -389,5 +394,371 @@ describe("pruneOldInstalls", () => {
     const removed = pruneOldInstalls(root, "memory", "0.4.10", 1);
     expect(removed).toEqual(["memory-0.4.2"]);
     expect(existsSync(join(root, "memory-0.4.9"))).toBe(true);
+  });
+});
+
+describe("pathSize", () => {
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "seed-size-"));
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("returns 0 for missing path", () => {
+    expect(pathSize(join(root, "nope"))).toBe(0);
+  });
+
+  test("returns byte size of a single file", () => {
+    const f = join(root, "x.txt");
+    writeFileSync(f, "hello world"); // 11 bytes
+    expect(pathSize(f)).toBe(11);
+  });
+
+  test("sums file sizes recursively", () => {
+    mkdirSync(join(root, "a/b"), { recursive: true });
+    writeFileSync(join(root, "top.txt"), "1234"); // 4
+    writeFileSync(join(root, "a/mid.txt"), "abcdef"); // 6
+    writeFileSync(join(root, "a/b/deep.txt"), "z"); // 1
+    expect(pathSize(root)).toBe(11);
+  });
+});
+
+describe("parseArtifactVersion", () => {
+  test("extracts version from well-formed artifact name", () => {
+    expect(parseArtifactVersion("memory-0.4.9-darwin-x64.tar.gz", "memory"))
+      .toBe("0.4.9");
+    expect(parseArtifactVersion("memory-0.4.10-linux-x64.tar.gz", "memory"))
+      .toBe("0.4.10");
+    expect(parseArtifactVersion("memory-0.4.9-rc1-darwin-arm64.tar.gz", "memory"))
+      .toBe("0.4.9-rc1");
+  });
+
+  test("returns null for non-matching names", () => {
+    expect(parseArtifactVersion("memory-0.4.9.tar.gz", "memory")).toBe(null);
+    expect(parseArtifactVersion("memory-darwin-x64.tar.gz", "memory")).toBe(null);
+    expect(parseArtifactVersion("other-0.4.9-darwin-x64.tar.gz", "memory")).toBe(null);
+    expect(parseArtifactVersion("memory-0.4.9-darwin-x64.zip", "memory")).toBe(null);
+  });
+
+  test("workloadId must match prefix exactly", () => {
+    expect(parseArtifactVersion("memory-service-0.4.9-darwin-x64.tar.gz", "memory"))
+      .toBe(null);
+  });
+});
+
+describe("pruneArtifactTarballs", () => {
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "seed-artifacts-"));
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const seedTarballs = (names: string[]): void => {
+    for (const n of names) writeFileSync(join(root, n), "tarball-contents");
+  };
+
+  test("removes tarballs whose version is not retained", () => {
+    seedTarballs([
+      "memory-0.4.2-darwin-x64.tar.gz",
+      "memory-0.4.8-darwin-x64.tar.gz",
+      "memory-0.4.9-darwin-x64.tar.gz",
+    ]);
+    const { removed, bytesFreed } = pruneArtifactTarballs(
+      root,
+      "memory",
+      new Set(["0.4.9"]),
+      false
+    );
+    expect(removed.sort()).toEqual([
+      "memory-0.4.2-darwin-x64.tar.gz",
+      "memory-0.4.8-darwin-x64.tar.gz",
+    ]);
+    expect(bytesFreed).toBeGreaterThan(0);
+    expect(existsSync(join(root, "memory-0.4.9-darwin-x64.tar.gz"))).toBe(true);
+    expect(existsSync(join(root, "memory-0.4.8-darwin-x64.tar.gz"))).toBe(false);
+  });
+
+  test("dryRun reports without deleting", () => {
+    seedTarballs(["memory-0.4.2-darwin-x64.tar.gz", "memory-0.4.9-darwin-x64.tar.gz"]);
+    const { removed } = pruneArtifactTarballs(
+      root,
+      "memory",
+      new Set(["0.4.9"]),
+      true
+    );
+    expect(removed).toEqual(["memory-0.4.2-darwin-x64.tar.gz"]);
+    expect(existsSync(join(root, "memory-0.4.2-darwin-x64.tar.gz"))).toBe(true);
+  });
+
+  test("ignores files for other workloads", () => {
+    seedTarballs([
+      "memory-0.4.2-darwin-x64.tar.gz",
+      "fleet-router-0.4.2-darwin-x64.tar.gz",
+    ]);
+    const { removed } = pruneArtifactTarballs(
+      root,
+      "memory",
+      new Set(["0.4.9"]),
+      false
+    );
+    expect(removed).toEqual(["memory-0.4.2-darwin-x64.tar.gz"]);
+    expect(existsSync(join(root, "fleet-router-0.4.2-darwin-x64.tar.gz"))).toBe(true);
+  });
+
+  test("ignores unrelated files in artifact root", () => {
+    seedTarballs(["memory-0.4.2-darwin-x64.tar.gz"]);
+    writeFileSync(join(root, "README.md"), "docs");
+    writeFileSync(join(root, "memory-latest.txt"), "pointer");
+    const { removed } = pruneArtifactTarballs(
+      root,
+      "memory",
+      new Set(),
+      false
+    );
+    expect(removed).toEqual(["memory-0.4.2-darwin-x64.tar.gz"]);
+    expect(existsSync(join(root, "README.md"))).toBe(true);
+    expect(existsSync(join(root, "memory-latest.txt"))).toBe(true);
+  });
+
+  test("no-op on non-existent root", () => {
+    rmSync(root, { recursive: true, force: true });
+    const { removed, bytesFreed } = pruneArtifactTarballs(
+      root,
+      "memory",
+      new Set(),
+      false
+    );
+    expect(removed).toEqual([]);
+    expect(bytesFreed).toBe(0);
+  });
+});
+
+describe("sweepTmpOrphans", () => {
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "seed-tmp-"));
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("removes semver-shaped tarballs and seed-owned dbs", () => {
+    writeFileSync(join(root, "memory-0.1.0-darwin-x64.tar.gz"), "old");
+    writeFileSync(join(root, "memory-0.2.0-darwin-x64.tar.gz"), "older");
+    writeFileSync(join(root, "seed-memory-seed.db"), "db");
+    writeFileSync(join(root, "seed-memory-seed.db-wal"), "wal");
+    const { removed } = sweepTmpOrphans(root, "memory", false);
+    expect(removed.sort()).toEqual(
+      [
+        "memory-0.1.0-darwin-x64.tar.gz",
+        "memory-0.2.0-darwin-x64.tar.gz",
+        "seed-memory-seed.db",
+        "seed-memory-seed.db-wal",
+      ].sort()
+    );
+  });
+
+  test("does not touch unrelated files", () => {
+    writeFileSync(join(root, "user-notes.txt"), "mine");
+    writeFileSync(join(root, "memory-thoughts.txt"), "mine too"); // no semver
+    writeFileSync(join(root, "memory.tar.gz"), "archive"); // no version
+    writeFileSync(join(root, "seed-other-seed.db"), "wrong workload");
+    const { removed } = sweepTmpOrphans(root, "memory", false);
+    expect(removed).toEqual([]);
+    expect(existsSync(join(root, "user-notes.txt"))).toBe(true);
+    expect(existsSync(join(root, "memory-thoughts.txt"))).toBe(true);
+    expect(existsSync(join(root, "seed-other-seed.db"))).toBe(true);
+  });
+
+  test("dryRun reports without deleting", () => {
+    writeFileSync(join(root, "memory-0.1.0-darwin-x64.tar.gz"), "contents");
+    const { removed } = sweepTmpOrphans(root, "memory", true);
+    expect(removed).toEqual(["memory-0.1.0-darwin-x64.tar.gz"]);
+    expect(existsSync(join(root, "memory-0.1.0-darwin-x64.tar.gz"))).toBe(true);
+  });
+
+  test("no-op on non-existent root", () => {
+    rmSync(root, { recursive: true, force: true });
+    const { removed } = sweepTmpOrphans(root, "memory", false);
+    expect(removed).toEqual([]);
+  });
+});
+
+describe("gcWorkload", () => {
+  let root: string;
+  let installRoot: string;
+  let artifactRoot: string;
+  let tmpRoot: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "seed-gc-"));
+    installRoot = join(root, "workloads");
+    artifactRoot = join(root, "artifacts");
+    tmpRoot = join(root, "tmp");
+    mkdirSync(installRoot, { recursive: true });
+    mkdirSync(artifactRoot, { recursive: true });
+    mkdirSync(tmpRoot, { recursive: true });
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const seedInstallDirs = (names: string[]) => {
+    for (const n of names) {
+      mkdirSync(join(installRoot, n), { recursive: true });
+      writeFileSync(join(installRoot, n, "marker"), "data-data");
+    }
+  };
+
+  test("retains current + keepPrior, removes older install-dirs and matching artifacts", () => {
+    seedInstallDirs([
+      "memory-0.4.2",
+      "memory-0.4.7",
+      "memory-0.4.8",
+      "memory-0.4.9",
+    ]);
+    for (const v of ["0.4.2", "0.4.7", "0.4.8", "0.4.9"]) {
+      writeFileSync(
+        join(artifactRoot, `memory-${v}-darwin-x64.tar.gz`),
+        "tarball-contents"
+      );
+    }
+
+    const report = gcWorkload("memory", "0.4.9", {
+      installRoot,
+      artifactRoot,
+      tmpRoot,
+      keepPrior: 1,
+      dryRun: false,
+    });
+
+    expect(report.installDirs.removed.sort()).toEqual([
+      "memory-0.4.2",
+      "memory-0.4.7",
+    ]);
+    expect(report.artifacts.removed.sort()).toEqual([
+      "memory-0.4.2-darwin-x64.tar.gz",
+      "memory-0.4.7-darwin-x64.tar.gz",
+    ]);
+    // Current + 1 prior retained:
+    expect(existsSync(join(installRoot, "memory-0.4.9"))).toBe(true);
+    expect(existsSync(join(installRoot, "memory-0.4.8"))).toBe(true);
+    expect(existsSync(join(installRoot, "memory-0.4.7"))).toBe(false);
+    // Retained install-dirs' artifacts stay:
+    expect(existsSync(join(artifactRoot, "memory-0.4.9-darwin-x64.tar.gz"))).toBe(true);
+    expect(existsSync(join(artifactRoot, "memory-0.4.8-darwin-x64.tar.gz"))).toBe(true);
+    // bytesFreed accounts for both:
+    expect(report.bytesFreed).toBeGreaterThan(0);
+    expect(report.bytesFreed).toBe(
+      report.installDirs.bytesFreed + report.artifacts.bytesFreed
+    );
+  });
+
+  test("keepPrior=0 removes every non-current version", () => {
+    seedInstallDirs(["memory-0.4.8", "memory-0.4.9"]);
+    const report = gcWorkload("memory", "0.4.9", {
+      installRoot,
+      artifactRoot,
+      tmpRoot,
+      keepPrior: 0,
+      dryRun: false,
+    });
+    expect(report.installDirs.removed).toEqual(["memory-0.4.8"]);
+    expect(existsSync(join(installRoot, "memory-0.4.9"))).toBe(true);
+  });
+
+  test("dryRun reports intended removals without touching disk", () => {
+    seedInstallDirs(["memory-0.4.8", "memory-0.4.9"]);
+    const report = gcWorkload("memory", "0.4.9", {
+      installRoot,
+      artifactRoot,
+      tmpRoot,
+      keepPrior: 0,
+      dryRun: true,
+    });
+    expect(report.installDirs.removed).toEqual(["memory-0.4.8"]);
+    expect(existsSync(join(installRoot, "memory-0.4.8"))).toBe(true);
+    expect(report.installDirs.bytesFreed).toBeGreaterThan(0);
+  });
+
+  test("currentVersion=null treats every install-dir as stale (keepPrior retains N most recent)", () => {
+    seedInstallDirs(["memory-0.4.7", "memory-0.4.8", "memory-0.4.9"]);
+    const report = gcWorkload("memory", null, {
+      installRoot,
+      artifactRoot,
+      tmpRoot,
+      keepPrior: 1,
+      dryRun: false,
+    });
+    // keepPrior=1 + no current = keep the single most-recent version
+    expect(report.installDirs.removed.sort()).toEqual([
+      "memory-0.4.7",
+      "memory-0.4.8",
+    ]);
+    expect(existsSync(join(installRoot, "memory-0.4.9"))).toBe(true);
+  });
+
+  test("keepPrior=-1 retains everything", () => {
+    seedInstallDirs(["memory-0.4.2", "memory-0.4.8", "memory-0.4.9"]);
+    const report = gcWorkload("memory", "0.4.9", {
+      installRoot,
+      artifactRoot,
+      tmpRoot,
+      keepPrior: -1,
+      dryRun: false,
+    });
+    expect(report.installDirs.removed).toEqual([]);
+    expect(existsSync(join(installRoot, "memory-0.4.2"))).toBe(true);
+  });
+
+  test("includeTmp=true sweeps tmp orphans", () => {
+    seedInstallDirs(["memory-0.4.9"]);
+    writeFileSync(join(tmpRoot, "memory-0.1.0-darwin-x64.tar.gz"), "old");
+    writeFileSync(join(tmpRoot, "seed-memory-seed.db"), "db");
+    const report = gcWorkload("memory", "0.4.9", {
+      installRoot,
+      artifactRoot,
+      tmpRoot,
+      keepPrior: 1,
+      includeTmp: true,
+      dryRun: false,
+    });
+    expect(report.tmpOrphans.removed.sort()).toEqual([
+      "memory-0.1.0-darwin-x64.tar.gz",
+      "seed-memory-seed.db",
+    ]);
+  });
+
+  test("includeTmp=false (default) leaves tmp alone", () => {
+    seedInstallDirs(["memory-0.4.9"]);
+    writeFileSync(join(tmpRoot, "memory-0.1.0-darwin-x64.tar.gz"), "old");
+    const report = gcWorkload("memory", "0.4.9", {
+      installRoot,
+      artifactRoot,
+      tmpRoot,
+      keepPrior: 1,
+      dryRun: false,
+    });
+    expect(report.tmpOrphans.removed).toEqual([]);
+    expect(existsSync(join(tmpRoot, "memory-0.1.0-darwin-x64.tar.gz"))).toBe(true);
+  });
+
+  test("no-op when nothing to clean", () => {
+    seedInstallDirs(["memory-0.4.9"]);
+    const report = gcWorkload("memory", "0.4.9", {
+      installRoot,
+      artifactRoot,
+      tmpRoot,
+      keepPrior: 1,
+      dryRun: false,
+    });
+    expect(report.installDirs.removed).toEqual([]);
+    expect(report.artifacts.removed).toEqual([]);
+    expect(report.tmpOrphans.removed).toEqual([]);
+    expect(report.bytesFreed).toBe(0);
   });
 });
