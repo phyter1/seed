@@ -1,3 +1,15 @@
+/**
+ * How often a piece of content should be re-fetched from its source.
+ * 'static' means never auto-refresh. Narrow this union later once the
+ * fetcher scheduler lands and chooses an enforcement model.
+ */
+export type RefreshPolicy =
+  | "static"
+  | "daily"
+  | "weekly"
+  | "monthly"
+  | "on-demand";
+
 export interface Memory {
   id: number;
   source: string;
@@ -13,6 +25,14 @@ export interface Memory {
   access_count: number;
   last_accessed: string;
   parent_id: number | null;
+  /** URL this memory was fetched from (if external). Null for authored content. */
+  source_url: string | null;
+  /** ISO timestamp of when source_url was last fetched. */
+  fetched_at: string | null;
+  /** Cadence at which source_url should be re-fetched. */
+  refresh_policy: RefreshPolicy | null;
+  /** SHA-256 hex digest of raw_text. Used for exact-dup detection. */
+  content_hash: string | null;
 }
 
 export interface Entity {

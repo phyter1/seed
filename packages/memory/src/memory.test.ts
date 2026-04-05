@@ -1,4 +1,7 @@
 import { describe, expect, test, beforeEach } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { MemoryDB } from "./db";
 import { MemoryService } from "./memory";
 import { createFakeEmbedder, createFakeLLM } from "./test-helpers";
@@ -282,5 +285,119 @@ describe("MemoryDB", () => {
     const results = db.knnSearch(emb1, 2);
     expect(results.length).toBe(2);
     expect(results[0]!.distance).toBeLessThan(results[1]!.distance);
+  });
+});
+
+describe("MemoryDB provenance columns", () => {
+  let db: MemoryDB;
+  beforeEach(() => {
+    db = new MemoryDB(":memory:");
+  });
+
+  test("schema includes source_url, fetched_at, refresh_policy, content_hash", () => {
+    const cols = new Set<string>(
+      (db.raw.prepare("PRAGMA table_info(memories)").all() as any[]).map((r) => r.name)
+    );
+    expect(cols.has("source_url")).toBe(true);
+    expect(cols.has("fetched_at")).toBe(true);
+    expect(cols.has("refresh_policy")).toBe(true);
+    expect(cols.has("content_hash")).toBe(true);
+  });
+
+  test("round-trips all four provenance fields", () => {
+    const fetchedAt = "2026-04-04T12:00:00.000Z";
+    const id = db.storeMemory({
+      raw_text: "page contents",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      source_url: "https://example.com/doc",
+      fetched_at: fetchedAt,
+      refresh_policy: "weekly",
+      content_hash: "deadbeef".repeat(8),
+    });
+    const mem = db.getMemory(id);
+    expect(mem).not.toBeNull();
+    expect(mem!.source_url).toBe("https://example.com/doc");
+    expect(mem!.fetched_at).toBe(fetchedAt);
+    expect(mem!.refresh_policy).toBe("weekly");
+    expect(mem!.content_hash).toBe("deadbeef".repeat(8));
+  });
+
+  test("omitting provenance yields null columns (backwards compat)", () => {
+    const id = db.storeMemory({
+      raw_text: "authored",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+    });
+    const mem = db.getMemory(id);
+    expect(mem).not.toBeNull();
+    expect(mem!.source_url).toBeNull();
+    expect(mem!.fetched_at).toBeNull();
+    expect(mem!.refresh_policy).toBeNull();
+    expect(mem!.content_hash).toBeNull();
+  });
+
+  test("explicit null is preserved", () => {
+    const id = db.storeMemory({
+      raw_text: "x",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      source_url: null,
+      fetched_at: null,
+      refresh_policy: null,
+      content_hash: null,
+    });
+    const mem = db.getMemory(id);
+    expect(mem!.source_url).toBeNull();
+    expect(mem!.refresh_policy).toBeNull();
+  });
+
+  test("partial provenance (url only) round-trips with other fields null", () => {
+    const id = db.storeMemory({
+      raw_text: "x",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      source_url: "https://example.com",
+    });
+    const mem = db.getMemory(id);
+    expect(mem!.source_url).toBe("https://example.com");
+    expect(mem!.fetched_at).toBeNull();
+    expect(mem!.refresh_policy).toBeNull();
+    expect(mem!.content_hash).toBeNull();
+  });
+
+  test("migrations are idempotent across reopens", () => {
+    const dir = mkdtempSync(join(tmpdir(), "memdb-provenance-"));
+    const path = join(dir, "test.db");
+    try {
+      const db1 = new MemoryDB(path);
+      const id = db1.storeMemory({
+        raw_text: "hi",
+        summary: "s",
+        entities: [],
+        topics: [],
+        importance: 0.5,
+        source_url: "https://example.com",
+        content_hash: "abc",
+      });
+      db1.close();
+      // Re-open; migration should no-op, existing row should read back intact.
+      const db2 = new MemoryDB(path);
+      const mem = db2.getMemory(id);
+      expect(mem).not.toBeNull();
+      expect(mem!.source_url).toBe("https://example.com");
+      expect(mem!.content_hash).toBe("abc");
+      db2.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
