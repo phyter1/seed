@@ -697,13 +697,27 @@ async function upgradeOneMachine(
     };
   }
   process.stdout.write(`agent OK (${observed}). cli.update... `);
+  const cliOutcome = await dispatchCliUpdate(machineId, tag);
+  console.log(cliOutcome.message);
+  return {
+    machineId,
+    ok: true,
+    message: `agent upgraded to ${observed}; ${cliOutcome.message}`,
+  };
+}
 
-  // After the agent reconnects at the new version, ask it to update the
-  // seed-cli binary on the same machine (best-effort — a pure agent-only
-  // host with no CLI will report skip, which we count as success).
-  // Dispatch is fire-and-forget over HTTP; the command result comes back
-  // via the agent's WebSocket and lands in the audit log, so we poll
-  // there for the outcome.
+/**
+ * Dispatch cli.update to a machine and poll for the result. Used both
+ * during agent upgrade (post-reconnect) and as a standalone pass for
+ * machines whose agent is already at target but whose CLI may not be.
+ *
+ * Always returns success=true unless the HTTP dispatch itself fails —
+ * a machine with no seed-cli reports a skipping success from the agent.
+ */
+async function dispatchCliUpdate(
+  machineId: string,
+  tag: string
+): Promise<{ ok: boolean; message: string }> {
   let dispatch: { command_id?: string };
   try {
     dispatch = (await apiPost(`/v1/fleet/${machineId}/command`, {
@@ -712,39 +726,27 @@ async function upgradeOneMachine(
       timeout_ms: 60_000,
     })) as { command_id?: string };
   } catch (err: any) {
-    const cliMessage = `cli.update dispatch failed: ${err?.message ?? err}`;
-    console.log(cliMessage);
     return {
-      machineId,
-      ok: true,
-      message: `agent upgraded to ${observed}; ${cliMessage}`,
+      ok: false,
+      message: `cli.update dispatch failed: ${err?.message ?? err}`,
     };
   }
 
   const commandId = dispatch.command_id;
   if (!commandId) {
-    console.log("dispatched (no command_id returned)");
-    return {
-      machineId,
-      ok: true,
-      message: `agent upgraded to ${observed}; cli.update dispatched`,
-    };
+    return { ok: true, message: "cli.update dispatched (no command_id)" };
   }
 
   const result = await waitForCommandResult(machineId, commandId, 20_000);
   if (!result) {
-    console.log("dispatched (result pending; see `seed fleet audit`)");
     return {
-      machineId,
       ok: true,
-      message: `agent upgraded to ${observed}; cli.update dispatched (result pending)`,
+      message: "cli.update dispatched (result pending; see `seed fleet audit`)",
     };
   }
-  console.log(result.output ?? (result.success ? "ok" : "failed"));
   return {
-    machineId,
-    ok: true,
-    message: `agent upgraded to ${observed}; ${result.output ?? (result.success ? "cli.update ok" : "cli.update failed")}`,
+    ok: result.success,
+    message: result.output ?? (result.success ? "cli.update ok" : "cli.update failed"),
   };
 }
 
@@ -820,39 +822,64 @@ async function cmdUpgrade(args: string[]) {
   console.log("Plan:");
   for (const m of toUpgrade) {
     console.log(
-      `  [upgrade] ${m.id}: ${m.agent_version ?? "unknown"} -> ${release.version}`
+      `  [upgrade]  ${m.id}: ${m.agent_version ?? "unknown"} -> ${release.version}`
     );
   }
   for (const m of skipped) {
-    console.log(`  [skip]    ${m.id}: already at ${release.version}`);
+    console.log(
+      `  [cli-only] ${m.id}: agent already at ${release.version}, refresh CLI`
+    );
   }
   const disconnected = machines.filter(
     (m) => !m.connected && m.status === "accepted"
   );
   if (!opts.machineId) {
     for (const m of disconnected) {
-      console.log(`  [offline] ${m.id}: not connected, skipping`);
+      console.log(`  [offline]  ${m.id}: not connected, skipping`);
     }
   }
 
-  if (opts.dryRun || toUpgrade.length === 0) {
-    if (toUpgrade.length === 0) console.log("\nNothing to do.");
+  if (opts.dryRun || (toUpgrade.length === 0 && skipped.length === 0)) {
+    if (toUpgrade.length === 0 && skipped.length === 0)
+      console.log("\nNothing to do.");
     return;
   }
 
-  console.log("");
-  console.log(`Upgrading ${toUpgrade.length} machine(s)...`);
-
-  // Process in batches of opts.parallel.
   const results: Array<{ machineId: string; ok: boolean; message: string }> = [];
-  for (let i = 0; i < toUpgrade.length; i += opts.parallel) {
-    const batch = toUpgrade.slice(i, i + opts.parallel);
-    const batchResults = await Promise.all(
-      batch.map((m) =>
-        upgradeOneMachine(m.id, release.tag, release.version, opts.timeoutMs)
-      )
-    );
-    results.push(...batchResults);
+
+  // Phase 1: full upgrade (agent + CLI) for machines whose agent is behind.
+  if (toUpgrade.length > 0) {
+    console.log("");
+    console.log(`Upgrading ${toUpgrade.length} machine(s)...`);
+    for (let i = 0; i < toUpgrade.length; i += opts.parallel) {
+      const batch = toUpgrade.slice(i, i + opts.parallel);
+      const batchResults = await Promise.all(
+        batch.map((m) =>
+          upgradeOneMachine(m.id, release.tag, release.version, opts.timeoutMs)
+        )
+      );
+      results.push(...batchResults);
+    }
+  }
+
+  // Phase 2: cli.update-only for machines whose agent is already at target.
+  // Agent-only hosts report a skipping success; machines where the CLI is
+  // actually stale get refreshed here instead of silently drifting.
+  if (skipped.length > 0) {
+    console.log("");
+    console.log(`Refreshing CLI on ${skipped.length} machine(s)...`);
+    for (let i = 0; i < skipped.length; i += opts.parallel) {
+      const batch = skipped.slice(i, i + opts.parallel);
+      const batchResults = await Promise.all(
+        batch.map(async (m) => {
+          process.stdout.write(`  ${m.id}: cli.update... `);
+          const outcome = await dispatchCliUpdate(m.id, release.tag);
+          console.log(outcome.message);
+          return { machineId: m.id, ok: outcome.ok, message: outcome.message };
+        })
+      );
+      results.push(...batchResults);
+    }
   }
 
   console.log("");
