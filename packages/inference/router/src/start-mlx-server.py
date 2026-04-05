@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """
-Start the MLX LM server with a memory limit that respects other MLX processes.
+Start the MLX VLM server with a memory limit that respects other MLX processes.
 
 Checks the ren-stt server's /health endpoint to see how much memory Parakeet
 is using, then caps this process to use only what's left (minus OS headroom).
+
+Uses mlx-vlm (not mlx-lm): mlx-vlm serves both the multimodal gemma4 models
+and standard text models like Qwen3.5 from a single process, so the router
+only needs to manage one MLX runtime. Thinking-mode (for Qwen3.5) is a
+per-request field — mlx_vlm.server's chat completions endpoint accepts
+`enable_thinking` in the request body and defaults it to False.
 
 Usage:
   python3 src/start-mlx-server.py                    # auto-detect limit
@@ -36,8 +42,6 @@ def main():
     parser.add_argument("--model", default="mlx-community/Qwen3.5-9B-MLX-4bit")
     parser.add_argument("--stt-url", default="http://localhost:8222")
     parser.add_argument("--headroom-gb", type=float, default=2.0, help="GB reserved for OS")
-    parser.add_argument("--thinking", action="store_true", help="Enable thinking/reasoning mode")
-    parser.add_argument("--no-thinking", action="store_true", help="Disable thinking/reasoning mode")
     args = parser.parse_args()
 
     total = mx.device_info()["memory_size"]
@@ -51,26 +55,18 @@ def main():
     old_limit = mx.set_memory_limit(int(available))
     print(f"[mlx-server] Memory: {total / 1e9:.0f}GB total, {stt_mem / 1e9:.1f}GB STT, {headroom / 1e9:.0f}GB headroom")
     print(f"[mlx-server] Limit set: {available / 1e9:.1f}GB (was {old_limit / 1e9:.0f}GB)")
+    print("[mlx-server] Runtime: mlx-vlm (thinking-mode controlled per-request)")
 
-    # Determine thinking mode
-    enable_thinking = True  # default: on
-    if args.no_thinking:
-        enable_thinking = False
-    elif args.thinking:
-        enable_thinking = True
-    print(f"[mlx-server] Thinking mode: {'ON' if enable_thinking else 'OFF'}")
-
-    # Now start the MLX server within this memory-limited process
+    # Start the MLX VLM server within this memory-limited process.
     import sys
     sys.argv = [
-        "mlx_lm.server",
+        "mlx_vlm.server",
         "--host", args.host,
         "--port", str(args.port),
         "--model", args.model,
-        "--chat-template-args", json.dumps({"enable_thinking": enable_thinking}),
     ]
 
-    from mlx_lm.server import main as server_main
+    from mlx_vlm.server import main as server_main
     server_main()
 
 

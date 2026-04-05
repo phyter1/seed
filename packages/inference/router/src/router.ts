@@ -1,9 +1,10 @@
 /**
- * Rule-based Fleet Router v1.0 — deterministic routing + MLX thinking lifecycle.
+ * Rule-based Fleet Router v1.2 — deterministic routing + mlx-vlm runtime.
  *
  * Ported from ren-jury's battle-tested rule-router.ts. Sub-millisecond routing
- * via keyword matching. Manages the MLX server's thinking mode: restarts it with
- * enable_thinking true/false as needed.
+ * via keyword matching. Backed by mlx-vlm on ren3, which serves gemma4 and
+ * Qwen3.5 from a single process and accepts `enable_thinking` as a per-request
+ * field (no server restart required to toggle thinking mode).
  *
  * Fleet manifest is built from seed.config.json (or env vars as fallback).
  *
@@ -80,38 +81,23 @@ function routePatternFromReason(reason: string): string {
 // ── MLX Server State ────────────────────────────────────────────────────────
 
 interface MlxState {
+  /** Last requested thinking-mode (informational — actual mode is per-request). */
   thinking: boolean;
   pid: number | null;
-  restarting: boolean;
 }
 
 const mlxState: MlxState = {
   thinking: false,
   pid: null,
-  restarting: false,
 };
-
-let mlxRestartLock: Promise<void> = Promise.resolve();
-
-async function withMlxLock<T>(fn: () => Promise<T>): Promise<T> {
-  const previous = mlxRestartLock;
-  let release!: () => void;
-  mlxRestartLock = new Promise((resolve) => { release = resolve; });
-  await previous;
-  try {
-    return await fn();
-  } finally {
-    release();
-  }
-}
 
 function killMlxServers(): void {
   // Bootout launchd service if present (prevents auto-restart on macOS)
   const uid = String(process.getuid?.() ?? 501);
   spawnSync("/bin/launchctl", ["bootout", `gui/${uid}/com.ren-jury.mlx-server`], { encoding: "utf8", timeout: 5000 });
-  // Kill any remaining mlx_lm processes
+  // Kill any remaining mlx_vlm processes (also mlx_lm, for migration-era cleanup)
+  spawnSync("pkill", ["-f", "mlx_vlm.server"], { encoding: "utf8", timeout: 5000 });
   spawnSync("pkill", ["-f", "mlx_lm.server"], { encoding: "utf8", timeout: 5000 });
-  spawnSync("pkill", ["-f", "mlx_lm server"], { encoding: "utf8", timeout: 5000 });
   console.log("[mlx] killed existing server(s)");
   mlxState.pid = null;
 }
@@ -165,14 +151,15 @@ function waitMlxPortFree(timeoutMs = 5000, intervalMs = 100): Promise<number> {
 }
 
 const mlxSupervisor = new MlxSupervisor({
-  spawn: (thinking: boolean) => {
+  // The supervisor passes `thinking` for respawn consistency; mlx-vlm controls
+  // thinking per-request so the flag is ignored here.
+  spawn: (_thinking: boolean) => {
     const args = [
       MLX_STARTER,
       "--model", MLX_MODEL,
       "--port", MLX_HOST.split(":")[1] ?? "8080",
-      thinking ? "--thinking" : "--no-thinking",
     ];
-    console.log(`[mlx] starting server: thinking=${thinking}`);
+    console.log("[mlx] starting server");
     const proc = spawn(MLX_PYTHON_PATH, args, {
       stdio: "inherit",
       detached: true,
@@ -183,13 +170,6 @@ const mlxSupervisor = new MlxSupervisor({
   log: (m) => console.log(`[mlx-sup] ${m}`),
   waitPortFree: () => waitMlxPortFree(),
 });
-
-async function startMlxServer(thinking: boolean): Promise<void> {
-  mlxSupervisor.start(thinking);
-  const snap = mlxSupervisor.getState();
-  mlxState.pid = snap.pid;
-  mlxState.thinking = thinking;
-}
 
 async function waitForMlxReady(timeoutMs = 30000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
@@ -203,47 +183,47 @@ async function waitForMlxReady(timeoutMs = 30000): Promise<boolean> {
   return false;
 }
 
-async function ensureMlxThinking(thinking: boolean): Promise<void> {
-  if (mlxState.thinking === thinking && !mlxState.restarting) {
+let mlxStartLock: Promise<void> = Promise.resolve();
+
+/**
+ * Ensure the MLX server is reachable. If it isn't, spawn it through the
+ * supervisor and wait until /v1/models responds. Concurrent callers serialize
+ * through a single lock so we never race on spawn.
+ *
+ * Thinking-mode is controlled per-request in mlx-vlm — no server restart
+ * needed, so this function is a liveness check rather than a state-toggle.
+ */
+async function ensureMlxAlive(): Promise<void> {
+  try {
+    const res = await fetch(`http://${MLX_HOST}/v1/models`);
+    if (res.ok) return;
+  } catch { /* server down, fall through and start */ }
+
+  const previous = mlxStartLock;
+  let release!: () => void;
+  mlxStartLock = new Promise((resolve) => { release = resolve; });
+  await previous;
+  try {
+    // Re-check after acquiring the lock — prior holder may have started it.
     try {
       const res = await fetch(`http://${MLX_HOST}/v1/models`);
       if (res.ok) return;
-    } catch { /* server dead, restart */ }
-  }
+    } catch { /* still down */ }
 
-  return withMlxLock(async () => {
-    if (mlxState.thinking === thinking && !mlxState.restarting) {
-      try {
-        const res = await fetch(`http://${MLX_HOST}/v1/models`);
-        if (res.ok) return;
-      } catch { /* proceed with restart */ }
-    }
+    console.log("[mlx] server unreachable — spawning");
+    mlxSupervisor.start(false);
+    const snap = mlxSupervisor.getState();
+    mlxState.pid = snap.pid;
 
-    mlxState.restarting = true;
-    console.log(`[mlx] cycling: thinking=${mlxState.thinking} -> thinking=${thinking}`);
-
-    mlxSupervisor.markIntentional();
-    killMlxServers();
-    for (let i = 0; i < 10; i++) {
-      await Bun.sleep(1000);
-      try {
-        const res = await fetch(`http://${MLX_HOST}/v1/models`);
-        if (!res.ok) break;
-      } catch {
-        break;
-      }
-    }
-
-    await startMlxServer(thinking);
     const ready = await waitForMlxReady();
-    mlxState.restarting = false;
-
     if (!ready) {
-      throw new Error(`MLX server failed to start in thinking=${thinking} mode`);
+      throw new Error("MLX server failed to become ready");
     }
     mlxSupervisor.reportHealthy();
-    console.log(`[mlx] ready: thinking=${thinking}`);
-  });
+    console.log("[mlx] ready");
+  } finally {
+    release();
+  }
 }
 
 // Background health probe: when MLX is reachable, keep the supervisor's
@@ -317,11 +297,18 @@ function routeRequest(content: string, options: { model?: string; thinking?: boo
 
 // ── Backend Clients ─────────────────────────────────────────────────────────
 
-async function callOpenAICompatible(host: string, model: string, messages: ChatMessage[], options: { temperature?: number; maxTokens?: number } = {}): Promise<ChatResponse> {
+async function callOpenAICompatible(host: string, model: string, messages: ChatMessage[], options: { temperature?: number; maxTokens?: number; enableThinking?: boolean } = {}): Promise<ChatResponse> {
+  const body: Record<string, unknown> = {
+    model,
+    messages,
+    temperature: options.temperature ?? 0.7,
+    max_tokens: options.maxTokens ?? 2048,
+  };
+  if (options.enableThinking !== undefined) body.enable_thinking = options.enableThinking;
   const res = await fetch(`http://${host}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model, messages, temperature: options.temperature ?? 0.7, max_tokens: options.maxTokens ?? 2048 }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`OpenAI-compatible ${host} error: ${res.status} ${await res.text()}`);
   const data = await res.json();
@@ -345,7 +332,7 @@ async function callOllama(host: string, model: string, messages: ChatMessage[], 
   return {
     content: data.message?.content ?? "",
     model: data.model ?? model,
-    usage: { prompt_tokens: data.prompt_eval_count ?? 0, completion_tokens: data.eval_count ?? 0, total_tokens: (data.prompt_eval_count ?? 0) + (data.eval_count ?? 0) },
+    usage: { input_tokens: data.prompt_eval_count ?? 0, output_tokens: data.eval_count ?? 0, total_tokens: (data.prompt_eval_count ?? 0) + (data.eval_count ?? 0) },
   };
 }
 
@@ -354,13 +341,21 @@ async function callOllama(host: string, model: string, messages: ChatMessage[], 
 async function streamOpenAICompatible(
   host: string, model: string, messages: ChatMessage[],
   writer: WritableStreamDefaultWriter<Uint8Array>,
-  options: { temperature?: number; maxTokens?: number } = {},
+  options: { temperature?: number; maxTokens?: number; enableThinking?: boolean } = {},
 ): Promise<void> {
   const encoder = new TextEncoder();
+  const body: Record<string, unknown> = {
+    model,
+    messages,
+    temperature: options.temperature ?? 0.7,
+    max_tokens: options.maxTokens ?? 2048,
+    stream: true,
+  };
+  if (options.enableThinking !== undefined) body.enable_thinking = options.enableThinking;
   const res = await fetch(`http://${host}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model, messages, temperature: options.temperature ?? 0.7, max_tokens: options.maxTokens ?? 2048, stream: true }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`OpenAI-compatible ${host} error: ${res.status} ${await res.text()}`);
 
@@ -555,8 +550,8 @@ function buildJurorAssignments(tasks: JuryTask[]): SeedJurorAssignment[] {
       });
       return {
         content: res.content,
-        promptTokens: res.usage?.prompt_tokens,
-        completionTokens: res.usage?.completion_tokens,
+        promptTokens: res.usage?.input_tokens,
+        completionTokens: res.usage?.output_tokens,
       };
     },
   }));
@@ -595,7 +590,7 @@ Synthesize into a single best response. Take the strongest elements from each. D
       MLX_HOST,
       MLX_MODEL,
       [{ role: "user", content: aggregationPrompt }],
-      { temperature: 0.3, maxTokens },
+      { temperature: 0.3, maxTokens, enableThinking: false },
     );
     return aggregated.content;
   };
@@ -933,12 +928,12 @@ const server = Bun.serve({
     if (url.pathname === "/health") {
       return Response.json({
         status: "ok",
-        router: "rule-based-v1.0",
+        router: "rule-based-v1.2",
+        runtime: "mlx-vlm",
         fleet: FLEET.length,
         mlx: {
           model: MLX_MODEL,
           thinking: mlxState.thinking,
-          restarting: mlxState.restarting,
           supervisor: mlxSupervisor.getState(),
         },
         config_source: CONFIG_SOURCE,
@@ -950,16 +945,12 @@ const server = Bun.serve({
       return Response.json(mlxState);
     }
 
-    // Manual MLX thinking toggle
+    // Thinking-mode tracker (observability only — thinking is per-request
+    // under mlx-vlm, so this endpoint no longer restarts MLX).
     if (url.pathname === "/mlx/thinking" && req.method === "POST") {
       const body = await req.json();
-      const thinking = Boolean(body.thinking);
-      try {
-        await ensureMlxThinking(thinking);
-        return Response.json({ ok: true, thinking: mlxState.thinking });
-      } catch (err) {
-        return Response.json({ ok: false, error: String(err) }, { status: 500 });
-      }
+      mlxState.thinking = Boolean(body.thinking);
+      return Response.json({ ok: true, thinking: mlxState.thinking });
     }
 
     // List fleet
@@ -1093,9 +1084,9 @@ const server = Bun.serve({
               const mlxMachine = entry.machine;
               streamMachine = mlxMachine;
               await withMachineQueue(mlxMachine, async () => {
-                await ensureMlxThinking(needsThinking);
-                console.log(`[router] "${lastMessage.slice(0, 60)}..." -> ${mlxMachine}/${entry.model} (${reason}, stream)`);
-                return streamOpenAICompatible(entry.host, entry.model, messages, writer, { temperature, maxTokens });
+                await ensureMlxAlive();
+                console.log(`[router] "${lastMessage.slice(0, 60)}..." -> ${mlxMachine}/${entry.model} (${reason}, stream, thinking=${needsThinking})`);
+                return streamOpenAICompatible(entry.host, entry.model, messages, writer, { temperature, maxTokens, enableThinking: needsThinking });
               });
             } else {
               const candidates = FLEET.filter(m => m.model === entry.model && m.provider === "ollama");
@@ -1155,8 +1146,8 @@ const server = Bun.serve({
           const mlxMachine = entry.machine;
           dispatchedMachine = mlxMachine;
           response = await withMachineQueue(mlxMachine, async () => {
-            await ensureMlxThinking(needsThinking);
-            return callOpenAICompatible(entry.host, entry.model, messages, { temperature, maxTokens });
+            await ensureMlxAlive();
+            return callOpenAICompatible(entry.host, entry.model, messages, { temperature, maxTokens, enableThinking: needsThinking });
           });
           console.log(`[router] "${lastMessage.slice(0, 60)}..." -> ${mlxMachine}/${entry.model} (${reason}) [${Date.now() - start}ms]`);
         } else {
@@ -1195,8 +1186,8 @@ const server = Bun.serve({
         provider: telemetryProvider(entry.provider),
         route_type: routeType,
         route_pattern: routePattern,
-        tokens_prompt: response.usage?.prompt_tokens ?? 0,
-        tokens_completion: response.usage?.completion_tokens ?? 0,
+        tokens_prompt: response.usage?.input_tokens ?? 0,
+        tokens_completion: response.usage?.output_tokens ?? 0,
         duration_ms: Date.now() - start,
         status: "success",
         thinking_mode: needsThinking,
@@ -1228,39 +1219,24 @@ const ollamaMachineList = OLLAMA_MACHINES.map(m => m.name).join(", ") || "none";
 
 console.log(`
 +==================================================+
-|     Fleet Router v1.0 (rule-based + thinking)     |
+|     Fleet Router v1.2 (rule-based + mlx-vlm)      |
 |     http://localhost:${String(ROUTER_PORT).padEnd(27)}|
 +--------------------------------------------------+
 |  Routing:  keyword rules (0ms, no GPU)            |
+|  Runtime:  mlx-vlm                                 |
 |  MLX:      ${MLX_MODEL.slice(0, 37).padEnd(37)} |
-|  Thinking: managed (auto-cycle on demand)         |
+|  Thinking: per-request (enable_thinking flag)      |
 |  Fleet:    ${String(FLEET.length).padEnd(2)} models across ${String(ALL_MACHINE_NAMES.length).padEnd(2)} machines         |
 |  Ollama:   ${ollamaMachineList.slice(0, 37).padEnd(37)} |
 |  Config:   ${CONFIG_SOURCE.padEnd(37)} |
 +==================================================+
 `);
 
-// Verify MLX is reachable on startup
+// Verify MLX is reachable on startup. Under mlx-vlm, thinking-mode is set
+// per-request so there's no server-wide state to probe for.
 (async () => {
   const ready = await waitForMlxReady(5000);
   if (ready) {
-    try {
-      const res = await fetch(`http://${MLX_HOST}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: MLX_MODEL,
-          messages: [{ role: "user", content: "hi" }],
-          max_tokens: 16,
-        }),
-      });
-      const data = await res.json();
-      const hasReasoning = Boolean(data.choices?.[0]?.message?.reasoning);
-      mlxState.thinking = hasReasoning;
-      console.log(`[mlx] detected current mode: thinking=${hasReasoning}`);
-    } catch {
-      console.log("[mlx] probe failed, assuming thinking=false");
-    }
     console.log("[router] ready.");
   } else {
     console.log("[mlx] server not reachable — will start on first request");

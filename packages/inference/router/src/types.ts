@@ -35,9 +35,15 @@ export interface ChatResponse {
   reasoning?: string;
   model: string;
   usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
+    input_tokens: number;
+    output_tokens: number;
     total_tokens: number;
+    /** Prefill throughput (mlx-vlm only). */
+    prompt_tps?: number;
+    /** Generation throughput (mlx-vlm only). */
+    generation_tps?: number;
+    /** Peak GPU memory in GB (mlx-vlm only). */
+    peak_memory?: number;
   };
 }
 
