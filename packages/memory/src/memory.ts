@@ -66,6 +66,20 @@ export class MemoryService {
   ): Promise<IngestResult> {
     const trimmed = text.slice(0, 8000);
 
+    // Cheap content-hash short-circuit. When the caller supplies a
+    // content_hash and a byte-identical top-level memory already exists
+    // in this project, skip LLM summarization + embedding entirely.
+    // Costs a single indexed lookup; saves a full ingest cycle.
+    if (provenance?.content_hash) {
+      const existing = this.db.findByContentHash(
+        provenance.content_hash,
+        project
+      );
+      if (existing != null) {
+        return { status: "duplicate", duplicate_of: existing };
+      }
+    }
+
     let userPrompt = "Process this information for memory storage";
     if (source) userPrompt += ` (source: ${source})`;
     userPrompt += `:\n\n${trimmed}`;

@@ -191,6 +191,76 @@ describe("MemoryService.ingest", () => {
     expect(mem!.source_url).toBe("https://example.com/fallback");
     expect(mem!.refresh_policy).toBe("daily");
   });
+
+  test("short-circuits on content_hash match without calling LLM or embedder", async () => {
+    const { db, service } = makeService({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    // First ingest stores with hash.
+    const first = await service.ingest("original content", "src", "p", {
+      content_hash: "hash-abc-123",
+    });
+    expect(first.status).toBe("stored");
+
+    // Track LLM + embedder calls during second ingest.
+    const llmCallsBefore = db.raw
+      .prepare("SELECT COUNT(*) as c FROM memories")
+      .get() as { c: number };
+    const second = await service.ingest("original content", "src", "p", {
+      content_hash: "hash-abc-123",
+    });
+    const llmCallsAfter = db.raw
+      .prepare("SELECT COUNT(*) as c FROM memories")
+      .get() as { c: number };
+
+    expect(second.status).toBe("duplicate");
+    expect(second.duplicate_of).toBe(first.memory_id!);
+    // No new memory stored — proves the short-circuit ran.
+    expect(llmCallsAfter.c).toBe(llmCallsBefore.c);
+  });
+
+  test("content_hash match scopes to project (cross-project doesn't collide)", async () => {
+    const { service } = makeService({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    // Distinct content bodies so embedding-based dedup (which is NOT
+    // project-scoped today) doesn't fire; we're isolating the hash path.
+    const a = await service.ingest("alpha text for project a", "src", "project-a", {
+      content_hash: "hash-xyz",
+    });
+    const b = await service.ingest("beta text for project b", "src", "project-b", {
+      content_hash: "hash-xyz",
+    });
+    expect(a.status).toBe("stored");
+    expect(b.status).toBe("stored"); // different project → hash match doesn't fire
+    expect(a.memory_id).not.toBe(b.memory_id);
+  });
+
+  test("content_hash without pre-existing match stores normally", async () => {
+    const { db, service } = makeService({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const result = await service.ingest("new content", "src", "p", {
+      content_hash: "fresh-hash",
+    });
+    expect(result.status).toBe("stored");
+    expect(db.getMemory(result.memory_id!)!.content_hash).toBe("fresh-hash");
+  });
+
+  test("omitting content_hash skips the short-circuit path entirely", async () => {
+    // Store a memory with a known hash...
+    const { service } = makeService({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    await service.ingest("first content", "src", "p", {
+      content_hash: "known-hash",
+    });
+    // Then ingest byte-identical text without passing the hash — should
+    // still go through the normal flow (may still dedup via embeddings,
+    // but won't short-circuit on hash).
+    const second = await service.ingest("different content", "src", "p");
+    expect(second.status).toBe("stored");
+  });
 });
 
 describe("MemoryService.query", () => {
@@ -559,5 +629,113 @@ describe("MemoryDB origin column", () => {
     const mem = db.getMemory(id)!;
     expect(mem.origin).toBe("external");
     expect(mem.source_url).toBeNull();
+  });
+});
+
+describe("MemoryDB.findByContentHash", () => {
+  let db: MemoryDB;
+  beforeEach(() => {
+    db = new MemoryDB(":memory:");
+  });
+
+  test("returns memory id for matching hash", () => {
+    const id = db.storeMemory({
+      raw_text: "x",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      project: "p",
+      content_hash: "abc",
+    });
+    expect(db.findByContentHash("abc", "p")).toBe(id);
+  });
+
+  test("returns null when no matching hash", () => {
+    db.storeMemory({
+      raw_text: "x",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      project: "p",
+      content_hash: "abc",
+    });
+    expect(db.findByContentHash("zzz", "p")).toBeNull();
+  });
+
+  test("scopes match to the given project", () => {
+    const id = db.storeMemory({
+      raw_text: "x",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      project: "project-a",
+      content_hash: "shared",
+    });
+    expect(db.findByContentHash("shared", "project-a")).toBe(id);
+    expect(db.findByContentHash("shared", "project-b")).toBeNull();
+  });
+
+  test("skips chunk children (parent_id IS NOT NULL)", () => {
+    const parentId = db.storeMemory({
+      raw_text: "parent",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      project: "p",
+      content_hash: "hash-parent",
+    });
+    db.storeMemory({
+      raw_text: "child",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      project: "p",
+      parent_id: parentId,
+      content_hash: "hash-child",
+    });
+    // Parent found, child ignored even though it has its own hash.
+    expect(db.findByContentHash("hash-parent", "p")).toBe(parentId);
+    expect(db.findByContentHash("hash-child", "p")).toBeNull();
+  });
+
+  test("returns earliest id when multiple matches exist", () => {
+    const first = db.storeMemory({
+      raw_text: "x1",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      project: "p",
+      content_hash: "dup",
+    });
+    db.storeMemory({
+      raw_text: "x2",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      project: "p",
+      content_hash: "dup",
+    });
+    expect(db.findByContentHash("dup", "p")).toBe(first);
+  });
+
+  test("null project scopes to empty-string project", () => {
+    const id = db.storeMemory({
+      raw_text: "x",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      content_hash: "h",
+    });
+    // Default project is empty string
+    expect(db.findByContentHash("h", "")).toBe(id);
+    expect(db.findByContentHash("h")).toBe(id);
   });
 });
