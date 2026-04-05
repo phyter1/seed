@@ -472,31 +472,66 @@ export class MemoryService {
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i]!;
           const emb = await this.embedder.embed(chunk);
-          this.db.storeMemory({
-            raw_text: chunk,
-            summary: `[Chunk ${i + 1}/${chunks.length}] ${row.summary.slice(0, 100)}`,
-            entities,
-            topics,
-            importance: row.importance,
-            source: row.source,
-            project: row.project,
-            embedding: emb,
-            parent_id: row.id,
-            source_url: row.source_url,
-            fetched_at: row.fetched_at,
-            refresh_policy: row.refresh_policy as RefreshPolicy | null,
-            content_hash: row.content_hash,
-            origin: row.origin as Origin | null,
-          });
-          count++;
+          try {
+            this.db.storeMemory({
+              raw_text: chunk,
+              summary: `[Chunk ${i + 1}/${chunks.length}] ${row.summary.slice(0, 100)}`,
+              entities,
+              topics,
+              importance: row.importance,
+              source: row.source,
+              project: row.project,
+              embedding: emb,
+              parent_id: row.id,
+              source_url: row.source_url,
+              fetched_at: row.fetched_at,
+              refresh_policy: row.refresh_policy as RefreshPolicy | null,
+              content_hash: row.content_hash,
+              origin: row.origin as Origin | null,
+            });
+            count++;
+          } catch {
+            // Same vec0 LEFT-JOIN quirk as below — tolerate stale PK collisions.
+          }
         }
       } else {
         const text = `${row.summary}\n${row.raw_text.slice(0, 500)}`;
         const emb = await this.embedder.embed(text);
-        this.db.insertEmbedding(row.id, emb);
-        count++;
+        try {
+          this.db.insertEmbedding(row.id, emb);
+          count++;
+        } catch {
+          // Same vec0 LEFT-JOIN quirk as the chunk path below.
+        }
       }
     }
+
+    // Also embed stranded chunk rows (parent_id IS NOT NULL) that
+    // were created by an earlier version without committing to
+    // vec_memories. Uses the same single-chunk embedding text
+    // pattern as the parent path above.
+    //
+    // Defensive insert handling: LEFT JOIN + hasEmbedding checks
+    // against the vec0 virtual table can miss existing rows, so
+    // INSERT may still hit UNIQUE violations on a PK that SELECT
+    // reports as absent. Catch per-row and continue so one stale
+    // entry does not crash the whole run.
+    const chunkRows = this.db.chunksMissingEmbeddings();
+    for (const row of chunkRows) {
+      if (this.db.hasEmbedding(row.id)) continue;
+      const text = `${row.summary}\n${row.raw_text.slice(0, 500)}`;
+      const emb = await this.embedder.embed(text);
+      try {
+        this.db.insertEmbedding(row.id, emb);
+        count++;
+      } catch {
+        // Swallow any per-row insert error (most commonly UNIQUE
+        // violations against the vec0 virtual table where SELECT
+        // reports the row absent but INSERT sees it). Keep going
+        // so one stale entry does not crash the whole run.
+      }
+    }
+
     return count;
   }
 }
