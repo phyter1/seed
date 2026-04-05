@@ -1,7 +1,7 @@
 {
   "name": "@seed/router",
-  "version": "1.1.1",
-  "description": "Rule-based fleet router with deterministic keyword routing, MLX thinking lifecycle, and jury mode",
+  "version": "1.2.0",
+  "description": "Rule-based fleet router backed by mlx-vlm, with deterministic keyword routing and jury mode",
   "type": "module",
   "scripts": {
     "build": "tsc",

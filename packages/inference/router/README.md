@@ -1,6 +1,21 @@
 # @seed/fleet-router
 
-Rule-based fleet router with MLX lifecycle supervision and jury aggregation.
+Rule-based fleet router backed by mlx-vlm, with crash-recovery supervision and jury aggregation.
+
+## MLX runtime
+
+The router spawns MLX via `mlx_vlm.server` (not `mlx_lm.server`). mlx-vlm serves
+both the multimodal gemma4 models and standard text models like Qwen3.5 from
+a single process, so ren3 runs exactly one MLX runtime. Thinking-mode for
+Qwen3.5 is a per-request field — the router sends `enable_thinking` in each
+request body instead of restarting the MLX server to toggle modes.
+
+**Python deps on the host:** mlx-vlm requires `torch` and `torchvision` for
+Qwen3.5's processor class. Install with:
+
+```
+pip3.11 install mlx mlx-vlm torch torchvision huggingface_hub
+```
 
 ## Artifact builds
 

@@ -90,7 +90,7 @@ for target in $TARGETS; do
 {
   "id": "fleet-router",
   "version": "$VERSION",
-  "description": "Rule-based fleet router with MLX lifecycle and jury aggregation",
+  "description": "Rule-based fleet router backed by mlx-vlm with crash-recovery supervision and jury aggregation",
   "platform": "$platform",
   "arch": "$arch",
   "binary": "bin/fleet-router",
