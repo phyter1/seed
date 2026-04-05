@@ -1091,16 +1091,210 @@ async function cmdWorkloadGc(args: string[]) {
   printWorkloadGcReport(opts.machineId, payload);
 }
 
+/**
+ * Parse `--machine <id> <workload_id>` shape used by install/reload/remove/status.
+ * The workload_id positional is optional for `status` (list mode).
+ */
+function parseWorkloadActionArgs(
+  args: string[],
+  { workloadIdRequired }: { workloadIdRequired: boolean }
+): { machineId: string; workloadId?: string } {
+  let machineId: string | undefined;
+  let workloadId: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--machine" && args[i + 1]) machineId = args[++i];
+    else if (!a.startsWith("--") && !workloadId) workloadId = a;
+    else {
+      console.error(`Unknown argument: ${a}`);
+      process.exit(1);
+    }
+  }
+  if (!machineId) {
+    console.error("--machine <id> is required");
+    process.exit(1);
+  }
+  if (workloadIdRequired && !workloadId) {
+    console.error("<workload_id> is required");
+    process.exit(1);
+  }
+  return { machineId, workloadId };
+}
+
+/**
+ * Dispatch a workload.* action against an agent and print the result.
+ * Shared body for install/reload/remove, which all have the same shape:
+ * dispatch → wait → print success/output.
+ */
+async function dispatchWorkloadAction(
+  action: "workload.install" | "workload.reload" | "workload.remove",
+  machineId: string,
+  workloadId: string,
+  timeoutMs = 60_000
+): Promise<void> {
+  process.stdout.write(
+    `  ${machineId}: dispatching ${action} ${workloadId}... `
+  );
+  let dispatch: { command_id?: string };
+  try {
+    dispatch = (await apiPost(`/v1/fleet/${machineId}/command`, {
+      action,
+      params: { workload_id: workloadId },
+      timeout_ms: timeoutMs,
+    })) as { command_id?: string };
+  } catch (err: any) {
+    console.log(`FAIL (${err?.message ?? err})`);
+    process.exit(1);
+  }
+
+  const commandId = dispatch.command_id;
+  if (!commandId) {
+    console.log("dispatched (no command_id; check `seed fleet audit`)");
+    return;
+  }
+
+  console.log("dispatched. waiting for result...");
+  const result = await waitForCommandResult(machineId, commandId, timeoutMs);
+  if (!result) {
+    console.log("  result pending — re-check with: seed fleet audit --limit 10");
+    return;
+  }
+  if (!result.success) {
+    console.log(`  ✗ ${result.output ?? action + " failed"}`);
+    process.exit(1);
+  }
+  console.log(`  ✓ ${result.output ?? "ok"}`);
+}
+
+async function cmdWorkloadInstall(args: string[]) {
+  const { machineId, workloadId } = parseWorkloadActionArgs(args, {
+    workloadIdRequired: true,
+  });
+  // install can take a while (download + extract + reload service)
+  await dispatchWorkloadAction("workload.install", machineId, workloadId!, 300_000);
+}
+
+async function cmdWorkloadReload(args: string[]) {
+  const { machineId, workloadId } = parseWorkloadActionArgs(args, {
+    workloadIdRequired: true,
+  });
+  await dispatchWorkloadAction("workload.reload", machineId, workloadId!, 30_000);
+}
+
+async function cmdWorkloadRemove(args: string[]) {
+  const { machineId, workloadId } = parseWorkloadActionArgs(args, {
+    workloadIdRequired: true,
+  });
+  await dispatchWorkloadAction("workload.remove", machineId, workloadId!, 30_000);
+}
+
+async function cmdWorkloadStatus(args: string[]) {
+  const { machineId, workloadId } = parseWorkloadActionArgs(args, {
+    workloadIdRequired: false,
+  });
+  const params: Record<string, unknown> = {};
+  if (workloadId) params.workload_id = workloadId;
+
+  process.stdout.write(
+    `  ${machineId}: dispatching workload.status${workloadId ? ` (${workloadId})` : ""}... `
+  );
+  let dispatch: { command_id?: string };
+  try {
+    dispatch = (await apiPost(`/v1/fleet/${machineId}/command`, {
+      action: "workload.status",
+      params,
+      timeout_ms: 30_000,
+    })) as { command_id?: string };
+  } catch (err: any) {
+    console.log(`FAIL (${err?.message ?? err})`);
+    process.exit(1);
+  }
+
+  const commandId = dispatch.command_id;
+  if (!commandId) {
+    console.log("dispatched (no command_id)");
+    return;
+  }
+  console.log("dispatched. waiting for result...");
+  const result = await waitForCommandResult(machineId, commandId, 30_000);
+  if (!result) {
+    console.log("  result pending — re-check with: seed fleet audit --limit 10");
+    return;
+  }
+  if (!result.success) {
+    console.log(`  ✗ ${result.output ?? "workload.status failed"}`);
+    process.exit(1);
+  }
+
+  // Agent returns a single record (workloadId given) or an array (list mode).
+  // Pretty-print as a small table; on parse failure, fall back to raw output.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result.output ?? "");
+  } catch {
+    console.log(result.output ?? "(empty)");
+    return;
+  }
+  const records = Array.isArray(parsed) ? parsed : [parsed];
+  if (records.length === 0) {
+    console.log("  (no workloads installed)");
+    return;
+  }
+  console.log("");
+  console.log("  ID                 VERSION   STATE          SUPERVISOR");
+  console.log("  " + "-".repeat(60));
+  for (const r of records as Array<{
+    workload_id?: string;
+    version?: string;
+    state?: string;
+    supervisor_label?: string;
+  }>) {
+    const id = (r.workload_id ?? "?").padEnd(18);
+    const ver = (r.version ?? "-").padEnd(9);
+    const state = (r.state ?? "-").padEnd(14);
+    const sup = r.supervisor_label === "" ? "(static)" : r.supervisor_label ?? "-";
+    console.log(`  ${id} ${ver} ${state} ${sup}`);
+  }
+}
+
 async function cmdWorkload(args: string[]) {
   const sub = args[0];
   switch (sub) {
     case "gc":
       await cmdWorkloadGc(args.slice(1));
       break;
+    case "install":
+      await cmdWorkloadInstall(args.slice(1));
+      break;
+    case "reload":
+      await cmdWorkloadReload(args.slice(1));
+      break;
+    case "remove":
+      await cmdWorkloadRemove(args.slice(1));
+      break;
+    case "status":
+      await cmdWorkloadStatus(args.slice(1));
+      break;
     default:
       console.error("Usage: seed fleet workload <subcommand>");
       console.error("");
       console.error("Subcommands:");
+      console.error(
+        "  install <workload_id> --machine <id>"
+      );
+      console.error("     Install (or re-install) a declared workload on a machine");
+      console.error(
+        "  reload <workload_id> --machine <id>"
+      );
+      console.error("     Unload + reload the workload's supervisor (service kinds only)");
+      console.error(
+        "  remove <workload_id> --machine <id>"
+      );
+      console.error("     Unload supervisor and drop the workload record");
+      console.error(
+        "  status [<workload_id>] --machine <id>"
+      );
+      console.error("     Show the agent's workload records (all, or just one)");
       console.error(
         "  gc --machine <id> [--workload <id>] [--keep-prior N] [--include-tmp] [--dry-run]"
       );
@@ -1598,14 +1792,13 @@ async function main() {
         "  installs [<install_id>] [--status S] [--follow] [--events]"
       );
       console.log("                      Observe install sessions");
-      console.log(
-        "  workload gc --machine <id> [--workload <id>] [--keep-prior N]"
-      );
+      console.log("  workload install <id> --machine <id>");
+      console.log("  workload reload <id> --machine <id>");
+      console.log("  workload remove <id> --machine <id>");
+      console.log("  workload status [<id>] --machine <id>");
+      console.log("  workload gc --machine <id> [--workload <id>] [--keep-prior N]");
       console.log("              [--include-tmp] [--dry-run]");
-      console.log(
-        "                      Clean up old install-dirs, stale artifact"
-      );
-      console.log("                      tarballs, and /tmp bootstrap orphans");
+      console.log("                      Manage installed workloads on a machine");
       console.log(
         "  join <url> [--machine-id <id>] [--display-name <name>]  Register this machine with a control plane"
       );
