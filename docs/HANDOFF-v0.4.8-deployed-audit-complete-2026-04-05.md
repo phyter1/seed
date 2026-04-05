@@ -183,3 +183,21 @@ The doc-only fleet-state table correction from the evening session (`fe6f761`) w
 ### Commits this session
 None. Diagnosis + issue updates only.
 
+---
+
+## Follow-up: issue #36 closed
+
+**PR:** phyter1/seed#37 — `feat(router): supervise MLX child with respawn on unexpected exit`
+
+**Deployed:** fleet-router@1.1.0 on ren3 via `seed fleet workload install fleet-router --machine ren3` after SCP-staging the tarball and updating `machines.ren3` in CP config to bump `version: "1.1.0"` + new `artifact_url`.
+
+**Verified live:**
+- `kill <mlx_pid>` → supervisor observed SIGTERM, respawned within the 1s backoff window, new MLX child came up healthy, inference request succeeded end-to-end. `respawnCount: 1, consecutiveFailures: 0` post-recovery.
+- `POST /mlx/thinking {"thinking": ...}` toggle cycled MLX without incrementing `respawnCount` or `consecutiveFailures` — intentional-kill path confirmed.
+- `/health` now includes `mlx.supervisor: { pid, thinking, lastExitCode, lastExitSignal, lastExitAt, respawnCount, backoffMs, consecutiveFailures, isHealthy, givenUp }`.
+- 10s background health probe keeps `isHealthy` in sync with MLX reachability.
+
+**Design note:** intentional shutdown marker is bound to the specific proc reference rather than a boolean flag, to avoid racing a late exit of the old child against a new child. In practice the `pkill` path was observed to be slow enough that the old child's exit event routinely arrives *after* `currentProc` has been replaced — the stale-proc gate handles that case as a no-op. Both paths produce correct behavior.
+
+**Not in scope, flagged:** The intentional-kill cycle occasionally logs `OSError: [Errno 48] Address already in use` when the new MLX child races the dying old one for port 8080. Pre-existing behavior (pkill is asynchronous from the kernel's perspective). Router's health probe/wait loop eventually wins, but a cleaner shutdown-wait before spawn would remove the log noise.
+

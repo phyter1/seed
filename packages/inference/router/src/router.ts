@@ -12,6 +12,7 @@
 
 import { spawnSync, spawn } from "node:child_process";
 import { loadRouterConfig, type LoadedRouterConfig } from "./config";
+import { MlxSupervisor } from "./mlx-supervisor";
 import type { ModelEntry, ChatMessage, ChatResponse, RoutingResult, JurorResult, JuryResult } from "./types";
 import {
   createTelemetryEmitter,
@@ -114,21 +115,29 @@ function killMlxServers(): void {
   mlxState.pid = null;
 }
 
-async function startMlxServer(thinking: boolean): Promise<void> {
-  const args = [
-    MLX_STARTER,
-    "--model", MLX_MODEL,
-    "--port", MLX_HOST.split(":")[1] ?? "8080",
-    thinking ? "--thinking" : "--no-thinking",
-  ];
+const mlxSupervisor = new MlxSupervisor({
+  spawn: (thinking: boolean) => {
+    const args = [
+      MLX_STARTER,
+      "--model", MLX_MODEL,
+      "--port", MLX_HOST.split(":")[1] ?? "8080",
+      thinking ? "--thinking" : "--no-thinking",
+    ];
+    console.log(`[mlx] starting server: thinking=${thinking}`);
+    const proc = spawn(MLX_PYTHON_PATH, args, {
+      stdio: "inherit",
+      detached: true,
+    });
+    proc.unref();
+    return proc;
+  },
+  log: (m) => console.log(`[mlx-sup] ${m}`),
+});
 
-  console.log(`[mlx] starting server: thinking=${thinking}`);
-  const proc = spawn(MLX_PYTHON_PATH, args, {
-    stdio: "inherit",
-    detached: true,
-  });
-  proc.unref();
-  mlxState.pid = proc.pid ?? null;
+async function startMlxServer(thinking: boolean): Promise<void> {
+  mlxSupervisor.start(thinking);
+  const snap = mlxSupervisor.getState();
+  mlxState.pid = snap.pid;
   mlxState.thinking = thinking;
 }
 
@@ -163,6 +172,7 @@ async function ensureMlxThinking(thinking: boolean): Promise<void> {
     mlxState.restarting = true;
     console.log(`[mlx] cycling: thinking=${mlxState.thinking} -> thinking=${thinking}`);
 
+    mlxSupervisor.markIntentional();
     killMlxServers();
     for (let i = 0; i < 10; i++) {
       await Bun.sleep(1000);
@@ -181,9 +191,25 @@ async function ensureMlxThinking(thinking: boolean): Promise<void> {
     if (!ready) {
       throw new Error(`MLX server failed to start in thinking=${thinking} mode`);
     }
+    mlxSupervisor.reportHealthy();
     console.log(`[mlx] ready: thinking=${thinking}`);
   });
 }
+
+// Background health probe: when MLX is reachable, keep the supervisor's
+// isHealthy flag and backoff counters in sync. This catches the case where
+// the supervisor respawned MLX on its own (after an unexpected exit) — the
+// process comes back healthy without any ensureMlxThinking() call to reset
+// the counters.
+const HEALTH_PROBE_INTERVAL_MS = 10000;
+setInterval(async () => {
+  try {
+    const res = await fetch(`http://${MLX_HOST}/v1/models`);
+    if (res.ok) mlxSupervisor.reportHealthy();
+  } catch {
+    /* MLX unreachable — exit handler will drive the respawn */
+  }
+}, HEALTH_PROBE_INTERVAL_MS).unref?.();
 
 // ── Routing Rules ───────────────────────────────────────────────────────────
 
@@ -859,7 +885,12 @@ const server = Bun.serve({
         status: "ok",
         router: "rule-based-v1.0",
         fleet: FLEET.length,
-        mlx: { model: MLX_MODEL, thinking: mlxState.thinking, restarting: mlxState.restarting },
+        mlx: {
+          model: MLX_MODEL,
+          thinking: mlxState.thinking,
+          restarting: mlxState.restarting,
+          supervisor: mlxSupervisor.getState(),
+        },
         config_source: CONFIG_SOURCE,
       });
     }
