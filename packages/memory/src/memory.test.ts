@@ -243,7 +243,7 @@ describe("MemoryDB", () => {
   });
 
   test("delete removes memory and embedding", () => {
-    const emb = new Array(384).fill(0).map((_, i) => Math.sin(i));
+    const emb = new Array(1024).fill(0).map((_, i) => Math.sin(i));
     const id = db.storeMemory({
       raw_text: "x",
       summary: "y",
@@ -275,8 +275,8 @@ describe("MemoryDB", () => {
   });
 
   test("knn search returns nearest neighbors", () => {
-    const emb1 = new Array(384).fill(0).map((_, i) => Math.sin(i));
-    const emb2 = new Array(384).fill(0).map((_, i) => Math.cos(i));
+    const emb1 = new Array(1024).fill(0).map((_, i) => Math.sin(i));
+    const emb2 = new Array(1024).fill(0).map((_, i) => Math.cos(i));
     db.storeMemory({ raw_text: "a", summary: "a", entities: [], topics: [], importance: 0.5, embedding: emb1 });
     db.storeMemory({ raw_text: "b", summary: "b", entities: [], topics: [], importance: 0.5, embedding: emb2 });
     const results = db.knnSearch(emb1, 2);

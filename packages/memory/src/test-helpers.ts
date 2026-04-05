@@ -1,11 +1,11 @@
 import type { EmbedClient } from "./embed";
 import type { ChatMessage, LLMClient } from "./summarize";
 
-/** Deterministic embedder: hashes text into a 384-dim unit vector. */
+/** Deterministic embedder: hashes text into a 1024-dim unit vector. */
 export function createFakeEmbedder(): EmbedClient {
   return {
     async embed(text: string): Promise<number[]> {
-      const vec = new Array<number>(384).fill(0);
+      const vec = new Array<number>(1024).fill(0);
       let h1 = 0x811c9dc5;
       let h2 = 0xcbf29ce4;
       for (let i = 0; i < text.length; i++) {
@@ -13,8 +13,8 @@ export function createFakeEmbedder(): EmbedClient {
         h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
         h2 = Math.imul(h2 ^ c, 0x100000001b3 & 0xffffffff) >>> 0;
       }
-      // Spread bits across 384 dims deterministically
-      for (let i = 0; i < 384; i++) {
+      // Spread bits across 1024 dims deterministically
+      for (let i = 0; i < 1024; i++) {
         const s = ((h1 + i * 2654435761) ^ (h2 + i * 40503)) >>> 0;
         vec[i] = ((s & 0xffff) / 0xffff) * 2 - 1;
       }
@@ -23,7 +23,7 @@ export function createFakeEmbedder(): EmbedClient {
       for (const v of vec) mag += v * v;
       mag = Math.sqrt(mag);
       if (mag > 0) {
-        for (let i = 0; i < 384; i++) vec[i]! /= mag;
+        for (let i = 0; i < 1024; i++) vec[i]! /= mag;
       }
       return vec;
     },

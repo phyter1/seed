@@ -31,11 +31,26 @@ import type {
  * existing memory.db file (with ~6 months of accumulated 384-dim embeddings)
  * can be opened without migration. Do not "improve" it during the port.
  */
+/**
+ * Embedding dimension for the vec_memories table. Must match the
+ * output dimension of whatever embedder the MemoryService is wired
+ * to. qwen3-embedding:0.6b returns 1024 floats. The original Rusty
+ * Memory Haiku used all-MiniLM-L6-v2 (384 floats).
+ *
+ * Override via the MEMORY_EMBED_DIM env var if the deployment uses
+ * a different model.
+ */
+export const DEFAULT_EMBED_DIM = Number(
+  process.env.MEMORY_EMBED_DIM ?? "1024"
+);
+
 export class MemoryDB {
   private db: Database;
   public readonly hasVec: boolean;
+  public readonly embedDim: number;
 
-  constructor(path: string = "memory.db") {
+  constructor(path: string = "memory.db", embedDim: number = DEFAULT_EMBED_DIM) {
+    this.embedDim = embedDim;
     // Bun's embedded sqlite lacks extension loading. Use a system sqlite if
     // one is available so sqlite-vec can load. SEED_SQLITE_PATH overrides.
     const customSqlite = resolveSystemSqlite();
@@ -146,15 +161,49 @@ export class MemoryDB {
     }
 
     if (this.hasVec) {
-      try {
-        this.db.exec(`
-          CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories
-          USING vec0(memory_id INTEGER PRIMARY KEY, embedding float[384] distance_metric=cosine)
-        `);
-      } catch (err) {
-        console.warn(`[memory] Could not create vec_memories table: ${err}`);
-      }
+      this.ensureVecTable();
     }
+  }
+
+  /**
+   * Create or re-create the vec_memories virtual table at the
+   * configured embedding dimension. If an existing table uses a
+   * different dim, it's dropped — callers should run backfill
+   * afterward to re-populate embeddings with the new model.
+   */
+  private ensureVecTable(): void {
+    try {
+      // Inspect existing table dim, if present.
+      const existingDim = this.detectVecDim();
+      if (existingDim !== null && existingDim !== this.embedDim) {
+        console.warn(
+          `[memory] vec_memories dim ${existingDim} ≠ configured ${this.embedDim}; ` +
+            `dropping table — run /backfill to re-embed.`
+        );
+        this.db.exec("DROP TABLE IF EXISTS vec_memories");
+      }
+      this.db.exec(
+        `CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories
+         USING vec0(memory_id INTEGER PRIMARY KEY, embedding float[${this.embedDim}] distance_metric=cosine)`
+      );
+    } catch (err) {
+      console.warn(`[memory] Could not create vec_memories table: ${err}`);
+    }
+  }
+
+  /**
+   * Read the embedding dimension from the existing vec_memories
+   * table. Returns null if the table doesn't exist or the dim can't
+   * be parsed. sqlite_master stores the CREATE statement verbatim,
+   * so we grep it for the `float[N]` declaration.
+   */
+  private detectVecDim(): number | null {
+    const row = this.db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'vec_memories'")
+      .get() as { sql?: string } | undefined;
+    if (!row?.sql) return null;
+    const m = /float\[(\d+)\]/.exec(row.sql);
+    return m ? parseInt(m[1], 10) : null;
   }
 
   // --- Serialization helpers ---

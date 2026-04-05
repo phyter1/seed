@@ -24,7 +24,7 @@ async function main() {
 
   console.log(`[memory] starting on port ${PORT}`);
   console.log(`[memory] database: ${DB_PATH}`);
-  console.log(`[memory] vector search: ${db.hasVec ? "enabled" : "disabled"}`);
+  console.log(`[memory] vector search: ${db.hasVec ? `enabled (dim=${db.embedDim})` : "disabled"}`);
   const stats = db.getStats();
   console.log(
     `[memory] ${stats.total_memories} memories, ${stats.total_entities} entities, ` +

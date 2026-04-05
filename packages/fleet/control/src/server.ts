@@ -518,7 +518,29 @@ export function createApp(state: ControlPlaneState): Hono {
       result: "success",
     });
 
-    return c.json(entry);
+    // If the key is a per-machine config entry and that machine is
+    // currently connected, push the update over the WebSocket so the
+    // agent converges immediately. Without this, changes only reach
+    // the agent on its next announce, which can leave workloads and
+    // services waiting indefinitely for a manual restart.
+    const machineMatch = /^machines\.(.+)$/.exec(key);
+    let pushed = false;
+    if (machineMatch) {
+      const machineId = machineMatch[1];
+      const conn = state.connections.get(machineId);
+      if (conn) {
+        conn.ws.send(
+          JSON.stringify({
+            type: "config_update",
+            version: entry.version,
+            config: value,
+          })
+        );
+        pushed = true;
+      }
+    }
+
+    return c.json({ ...entry, pushed });
   });
 
   // --- Workloads ---
