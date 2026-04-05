@@ -5,6 +5,8 @@
 // their outputs differ meaningfully even when they share a base model.
 
 import { calculateAgreement } from "./agreement";
+import { runChallenge } from "./challenge";
+import type { ChallengeResult } from "./challenge";
 import type {
   InvokeOptions,
   JurorAssignment,
@@ -17,7 +19,17 @@ const DEFAULT_TEMPERATURES = [0.3, 0.5, 0.7, 0.9];
 const DEFAULT_MAX_TOKENS = 512;
 
 export async function runJury(request: JuryRequest): Promise<JuryResponse> {
-  const { jurors, messages, aggregator, queue, onJurorComplete, onAggregateComplete } = request;
+  const {
+    jurors,
+    messages,
+    aggregator,
+    queue,
+    onJurorComplete,
+    onAggregateComplete,
+    onChallengeComplete,
+    challenge: challengeConfig,
+    sensitivity,
+  } = request;
 
   if (jurors.length === 0) {
     throw new Error("runJury: jurors[] is empty");
@@ -38,10 +50,26 @@ export async function runJury(request: JuryRequest): Promise<JuryResponse> {
     }),
   );
 
+  let challengeResult: ChallengeResult | undefined;
+  if (challengeConfig?.enabled) {
+    challengeResult = await runChallenge({
+      question: lastUserMsg,
+      jurors: jurorResults,
+      config: challengeConfig,
+      sensitivity,
+    });
+    onChallengeComplete?.(challengeResult);
+  }
+
   const aggregateStart = Date.now();
   let consensus: string;
   try {
-    consensus = await aggregator({ question: lastUserMsg, jurors: jurorResults, maxTokens });
+    consensus = await aggregator({
+      question: lastUserMsg,
+      jurors: jurorResults,
+      maxTokens,
+      challenge: challengeResult,
+    });
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     onAggregateComplete?.({
@@ -66,6 +94,7 @@ export async function runJury(request: JuryRequest): Promise<JuryResponse> {
     agreement,
     aggregateDurationMs,
     totalDurationMs: Date.now() - start,
+    challenge: challengeResult,
   };
 }
 
