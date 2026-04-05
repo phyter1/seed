@@ -10,7 +10,14 @@ import {
 } from "./summarize";
 import { chunkText } from "./chunk";
 import { storeTriples } from "./graph";
-import type { IngestResult, Memory, ScoredMemory, Triple } from "./types";
+import type {
+  IngestResult,
+  Memory,
+  ProvenanceInput,
+  RefreshPolicy,
+  ScoredMemory,
+  Triple,
+} from "./types";
 
 export const DEDUP_THRESHOLD = 0.85;
 
@@ -50,7 +57,12 @@ export class MemoryService {
 
   // --- Ingest ----------------------------------------------------------
 
-  async ingest(text: string, source: string = "", project: string = ""): Promise<IngestResult> {
+  async ingest(
+    text: string,
+    source: string = "",
+    project: string = "",
+    provenance?: ProvenanceInput
+  ): Promise<IngestResult> {
     const trimmed = text.slice(0, 8000);
 
     let userPrompt = "Process this information for memory storage";
@@ -75,6 +87,7 @@ export class MemoryService {
         importance: 0.5,
         source,
         project,
+        ...provenance,
       });
       return { status: "stored", memory_id: mid, summary: "Failed to summarize" };
     }
@@ -109,6 +122,7 @@ export class MemoryService {
         importance,
         source,
         project,
+        ...provenance,
       });
 
       for (let i = 0; i < chunks.length; i++) {
@@ -124,6 +138,7 @@ export class MemoryService {
           project,
           embedding: chunkEmb,
           parent_id: parentId,
+          ...provenance,
         });
       }
 
@@ -160,6 +175,7 @@ export class MemoryService {
       source,
       project,
       embedding,
+      ...provenance,
     });
     if (triples.length > 0) storeTriples(this.db, triples, mid, project);
     return { status: "stored", memory_id: mid, summary };
@@ -451,6 +467,10 @@ export class MemoryService {
             project: row.project,
             embedding: emb,
             parent_id: row.id,
+            source_url: row.source_url,
+            fetched_at: row.fetched_at,
+            refresh_policy: row.refresh_policy as RefreshPolicy | null,
+            content_hash: row.content_hash,
           });
           count++;
         }

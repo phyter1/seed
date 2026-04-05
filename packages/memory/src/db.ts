@@ -22,6 +22,7 @@ import type {
   Entity,
   EntityGraph,
   MemoryStats,
+  RefreshPolicy,
 } from "./types";
 
 /**
@@ -159,6 +160,20 @@ export class MemoryDB {
     if (!memoriesCols.has("parent_id")) {
       this.db.exec("ALTER TABLE memories ADD COLUMN parent_id INTEGER DEFAULT NULL");
     }
+    // Provenance columns — added in memory@0.3.0. All nullable; existing
+    // rows stay null until re-ingested or backfilled.
+    if (!memoriesCols.has("source_url")) {
+      this.db.exec("ALTER TABLE memories ADD COLUMN source_url TEXT DEFAULT NULL");
+    }
+    if (!memoriesCols.has("fetched_at")) {
+      this.db.exec("ALTER TABLE memories ADD COLUMN fetched_at TEXT DEFAULT NULL");
+    }
+    if (!memoriesCols.has("refresh_policy")) {
+      this.db.exec("ALTER TABLE memories ADD COLUMN refresh_policy TEXT DEFAULT NULL");
+    }
+    if (!memoriesCols.has("content_hash")) {
+      this.db.exec("ALTER TABLE memories ADD COLUMN content_hash TEXT DEFAULT NULL");
+    }
 
     if (this.hasVec) {
       this.ensureVecTable();
@@ -243,6 +258,10 @@ export class MemoryDB {
       access_count: row.access_count ?? 0,
       last_accessed: row.last_accessed ?? "",
       parent_id: row.parent_id ?? null,
+      source_url: row.source_url ?? null,
+      fetched_at: row.fetched_at ?? null,
+      refresh_policy: (row.refresh_policy ?? null) as RefreshPolicy | null,
+      content_hash: row.content_hash ?? null,
     };
   }
 
@@ -256,13 +275,17 @@ export class MemoryDB {
     project?: string;
     embedding?: number[] | null;
     parent_id?: number | null;
+    source_url?: string | null;
+    fetched_at?: string | null;
+    refresh_policy?: RefreshPolicy | null;
+    content_hash?: string | null;
   }): number {
     const now = new Date().toISOString();
     const tx = this.db.transaction(() => {
       this.db
         .prepare(
-          `INSERT INTO memories (source, raw_text, summary, entities, topics, importance, created_at, project, parent_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO memories (source, raw_text, summary, entities, topics, importance, created_at, project, parent_id, source_url, fetched_at, refresh_policy, content_hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           params.source ?? "",
@@ -273,7 +296,11 @@ export class MemoryDB {
           params.importance,
           now,
           params.project ?? "",
-          params.parent_id ?? null
+          params.parent_id ?? null,
+          params.source_url ?? null,
+          params.fetched_at ?? null,
+          params.refresh_policy ?? null,
+          params.content_hash ?? null
         );
       const row = this.db.prepare("SELECT last_insert_rowid() as id").get() as { id: number };
       const mid = row.id;
@@ -430,12 +457,17 @@ export class MemoryDB {
     topics: string;
     importance: number;
     project: string;
+    source_url: string | null;
+    fetched_at: string | null;
+    refresh_policy: string | null;
+    content_hash: string | null;
   }> {
     if (!this.hasVec) return [];
     return this.db
       .prepare(
         `SELECT m.id, m.summary, m.raw_text, m.parent_id, m.source, m.entities,
-                m.topics, m.importance, m.project
+                m.topics, m.importance, m.project,
+                m.source_url, m.fetched_at, m.refresh_policy, m.content_hash
          FROM memories m
          LEFT JOIN vec_memories v ON m.id = v.memory_id
          WHERE v.memory_id IS NULL AND m.parent_id IS NULL`

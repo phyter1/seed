@@ -56,6 +56,78 @@ describe("memory HTTP API", () => {
     expect(res.status).toBe(400);
   });
 
+  test("POST /ingest stores provenance fields", async () => {
+    const { app, db } = makeApp({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const res = await app.request("/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: "page content",
+        source: "web",
+        project: "p",
+        source_url: "https://example.com/doc",
+        fetched_at: "2026-04-04T10:00:00.000Z",
+        refresh_policy: "weekly",
+        content_hash: "sha256hex",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const mem = db.getMemory(1)!;
+    expect(mem.source_url).toBe("https://example.com/doc");
+    expect(mem.fetched_at).toBe("2026-04-04T10:00:00.000Z");
+    expect(mem.refresh_policy).toBe("weekly");
+    expect(mem.content_hash).toBe("sha256hex");
+  });
+
+  test("POST /ingest 400 on invalid refresh_policy", async () => {
+    const { app } = makeApp({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const res = await app.request("/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "hi", refresh_policy: "hourly" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as any;
+    expect(body.error).toContain("refresh_policy");
+  });
+
+  test("POST /ingest without provenance stores null fields", async () => {
+    const { app, db } = makeApp({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const res = await app.request("/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "hi", project: "p" }),
+    });
+    expect(res.status).toBe(200);
+    const mem = db.getMemory(1)!;
+    expect(mem.source_url).toBeNull();
+    expect(mem.fetched_at).toBeNull();
+    expect(mem.refresh_policy).toBeNull();
+    expect(mem.content_hash).toBeNull();
+  });
+
+  test("POST /ingest accepts each valid refresh_policy value", async () => {
+    const policies = ["static", "daily", "weekly", "monthly", "on-demand"];
+    for (const policy of policies) {
+      const { app, db } = makeApp({
+        ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+      });
+      const res = await app.request("/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: "x", refresh_policy: policy }),
+      });
+      expect(res.status).toBe(200);
+      expect(db.getMemory(1)!.refresh_policy).toBe(policy as any);
+    }
+  });
+
   test("GET /query returns answer", async () => {
     const { app } = makeApp({
       ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },

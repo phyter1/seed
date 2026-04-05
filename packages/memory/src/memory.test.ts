@@ -1,4 +1,7 @@
 import { describe, expect, test, beforeEach } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { MemoryDB } from "./db";
 import { MemoryService } from "./memory";
 import { createFakeEmbedder, createFakeLLM } from "./test-helpers";
@@ -94,6 +97,58 @@ describe("MemoryService.ingest", () => {
     expect(children.length).toBe(result.chunks!);
   });
 
+  test("threads provenance from ingest call to stored memory", async () => {
+    const { db, service } = makeService({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const result = await service.ingest("hello", "web", "docs", {
+      source_url: "https://example.com/page",
+      fetched_at: "2026-04-04T10:00:00.000Z",
+      refresh_policy: "weekly",
+      content_hash: "abc123",
+    });
+    expect(result.status).toBe("stored");
+    const mem = db.getMemory(result.memory_id!);
+    expect(mem!.source_url).toBe("https://example.com/page");
+    expect(mem!.fetched_at).toBe("2026-04-04T10:00:00.000Z");
+    expect(mem!.refresh_policy).toBe("weekly");
+    expect(mem!.content_hash).toBe("abc123");
+  });
+
+  test("chunk children inherit provenance from parent", async () => {
+    const longText = "paragraph one.\n\n" + "long body sentence. ".repeat(200);
+    const { db, service } = makeService({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const result = await service.ingest(longText, "doc", "p", {
+      source_url: "https://example.com/big",
+      refresh_policy: "monthly",
+    });
+    expect(result.status).toBe("stored");
+    expect(result.chunks).toBeGreaterThan(1);
+    const children = db.raw
+      .prepare("SELECT id FROM memories WHERE parent_id = ?")
+      .all(result.memory_id!) as Array<{ id: number }>;
+    expect(children.length).toBeGreaterThan(0);
+    for (const { id } of children) {
+      const child = db.getMemory(id)!;
+      expect(child.source_url).toBe("https://example.com/big");
+      expect(child.refresh_policy).toBe("monthly");
+    }
+  });
+
+  test("omitting provenance in ingest yields null fields", async () => {
+    const { db, service } = makeService({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const result = await service.ingest("authored text", "note", "p");
+    const mem = db.getMemory(result.memory_id!);
+    expect(mem!.source_url).toBeNull();
+    expect(mem!.fetched_at).toBeNull();
+    expect(mem!.refresh_policy).toBeNull();
+    expect(mem!.content_hash).toBeNull();
+  });
+
   test("recovers gracefully when LLM returns invalid JSON", async () => {
     const { db, service } = makeService({ raw: "not json at all" });
     const result = await service.ingest("hello world", "src", "p");
@@ -101,6 +156,18 @@ describe("MemoryService.ingest", () => {
     const mem = db.getMemory(result.memory_id!);
     expect(mem).not.toBeNull();
     expect(mem!.summary).toContain("not json");
+  });
+
+  test("provenance survives the LLM-fails-json fallback path", async () => {
+    const { db, service } = makeService({ raw: "not json at all" });
+    const result = await service.ingest("hello", "src", "p", {
+      source_url: "https://example.com/fallback",
+      refresh_policy: "daily",
+    });
+    expect(result.status).toBe("stored");
+    const mem = db.getMemory(result.memory_id!);
+    expect(mem!.source_url).toBe("https://example.com/fallback");
+    expect(mem!.refresh_policy).toBe("daily");
   });
 });
 
@@ -282,5 +349,119 @@ describe("MemoryDB", () => {
     const results = db.knnSearch(emb1, 2);
     expect(results.length).toBe(2);
     expect(results[0]!.distance).toBeLessThan(results[1]!.distance);
+  });
+});
+
+describe("MemoryDB provenance columns", () => {
+  let db: MemoryDB;
+  beforeEach(() => {
+    db = new MemoryDB(":memory:");
+  });
+
+  test("schema includes source_url, fetched_at, refresh_policy, content_hash", () => {
+    const cols = new Set<string>(
+      (db.raw.prepare("PRAGMA table_info(memories)").all() as any[]).map((r) => r.name)
+    );
+    expect(cols.has("source_url")).toBe(true);
+    expect(cols.has("fetched_at")).toBe(true);
+    expect(cols.has("refresh_policy")).toBe(true);
+    expect(cols.has("content_hash")).toBe(true);
+  });
+
+  test("round-trips all four provenance fields", () => {
+    const fetchedAt = "2026-04-04T12:00:00.000Z";
+    const id = db.storeMemory({
+      raw_text: "page contents",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      source_url: "https://example.com/doc",
+      fetched_at: fetchedAt,
+      refresh_policy: "weekly",
+      content_hash: "deadbeef".repeat(8),
+    });
+    const mem = db.getMemory(id);
+    expect(mem).not.toBeNull();
+    expect(mem!.source_url).toBe("https://example.com/doc");
+    expect(mem!.fetched_at).toBe(fetchedAt);
+    expect(mem!.refresh_policy).toBe("weekly");
+    expect(mem!.content_hash).toBe("deadbeef".repeat(8));
+  });
+
+  test("omitting provenance yields null columns (backwards compat)", () => {
+    const id = db.storeMemory({
+      raw_text: "authored",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+    });
+    const mem = db.getMemory(id);
+    expect(mem).not.toBeNull();
+    expect(mem!.source_url).toBeNull();
+    expect(mem!.fetched_at).toBeNull();
+    expect(mem!.refresh_policy).toBeNull();
+    expect(mem!.content_hash).toBeNull();
+  });
+
+  test("explicit null is preserved", () => {
+    const id = db.storeMemory({
+      raw_text: "x",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      source_url: null,
+      fetched_at: null,
+      refresh_policy: null,
+      content_hash: null,
+    });
+    const mem = db.getMemory(id);
+    expect(mem!.source_url).toBeNull();
+    expect(mem!.refresh_policy).toBeNull();
+  });
+
+  test("partial provenance (url only) round-trips with other fields null", () => {
+    const id = db.storeMemory({
+      raw_text: "x",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      source_url: "https://example.com",
+    });
+    const mem = db.getMemory(id);
+    expect(mem!.source_url).toBe("https://example.com");
+    expect(mem!.fetched_at).toBeNull();
+    expect(mem!.refresh_policy).toBeNull();
+    expect(mem!.content_hash).toBeNull();
+  });
+
+  test("migrations are idempotent across reopens", () => {
+    const dir = mkdtempSync(join(tmpdir(), "memdb-provenance-"));
+    const path = join(dir, "test.db");
+    try {
+      const db1 = new MemoryDB(path);
+      const id = db1.storeMemory({
+        raw_text: "hi",
+        summary: "s",
+        entities: [],
+        topics: [],
+        importance: 0.5,
+        source_url: "https://example.com",
+        content_hash: "abc",
+      });
+      db1.close();
+      // Re-open; migration should no-op, existing row should read back intact.
+      const db2 = new MemoryDB(path);
+      const mem = db2.getMemory(id);
+      expect(mem).not.toBeNull();
+      expect(mem!.source_url).toBe("https://example.com");
+      expect(mem!.content_hash).toBe("abc");
+      db2.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
