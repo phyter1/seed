@@ -157,3 +157,29 @@ Filed: **phyter1/seed#35** — "seed fleet release --control-plane-machine is no
 ### Commits this session
 - `docs:` fleet-state table fix in this file only. Items 2 and 3 produced no code changes (issue + remote state on ren3).
 
+---
+
+## Follow-up session 2026-04-05 (late) — #35 ground-truthed, #36 filed
+
+### 1. Audit log verdict on v0.4.8 CP dispatch target ✓
+`seed fleet audit --limit 300` for the rollout window shows:
+
+```
+2026-04-05 16:49:26    command            ren2         control-plane.update dispatched
+2026-04-05 16:49:28    command            ren2         command_result       success
+```
+
+The `control-plane.update` command dispatched to **ren2** (correct CP host). So the v0.4.8 rollout was invoked with `--control-plane-machine ren2`, not `ren1` as the evening follow-up above asserted. The "3/0 success with wrong flag" contradiction was based on a misremembered flag value — no contradiction to explain, the flag was right and the rollout succeeded legitimately.
+
+### 2. Issue #35 — closed as not-a-bug
+Updated phyter1/seed#35 with the audit findings and closed it. The validation-gap observation (flag not pre-flight-checked against actual CP location) is still technically accurate but would manifest as a 60s timeout + `process.exit(1)` on wrong input — a UX gap, not an incorrect-success bug. If the hardening is worth doing, should be filed fresh with a clearer repro.
+
+### 3. Issue #36 — router MLX supervisor gap filed
+phyter1/seed#36 — "fleet-router: MLX child process not auto-respawned on unexpected exit". Repro + expected behavior documented. Labels `reliability`, `router` (created). Discovered during the evening's MLX launcher repoint — kill the MLX PID, router stays up but can't serve MLX requests until something manually pokes `/mlx/thinking`. Silent indefinite degraded state.
+
+### 4. Commit fe6f761 — left unpushed
+The doc-only fleet-state table correction from the evening session (`fe6f761`) was not pushed — no confirmation from Ryan available at the time of this session. Main is 1 commit ahead of origin/main, working tree clean. Next operator should push it (or fold it into their own commit) unless Ryan has already moved it.
+
+### Commits this session
+None. Diagnosis + issue updates only.
+
