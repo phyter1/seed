@@ -688,16 +688,102 @@ async function upgradeOneMachine(
     targetVersion,
     timeoutMs
   );
-  if (ok) {
-    console.log(`OK (${observed})`);
-    return { machineId, ok: true, message: `upgraded to ${observed}` };
+  if (!ok) {
+    console.log(`TIMEOUT (last observed: ${observed ?? "none"})`);
+    return {
+      machineId,
+      ok: false,
+      message: `timeout; last observed version: ${observed ?? "none"}`,
+    };
   }
-  console.log(`TIMEOUT (last observed: ${observed ?? "none"})`);
+  process.stdout.write(`agent OK (${observed}). cli.update... `);
+
+  // After the agent reconnects at the new version, ask it to update the
+  // seed-cli binary on the same machine (best-effort — a pure agent-only
+  // host with no CLI will report skip, which we count as success).
+  // Dispatch is fire-and-forget over HTTP; the command result comes back
+  // via the agent's WebSocket and lands in the audit log, so we poll
+  // there for the outcome.
+  let dispatch: { command_id?: string };
+  try {
+    dispatch = (await apiPost(`/v1/fleet/${machineId}/command`, {
+      action: "cli.update",
+      params: { version: tag },
+      timeout_ms: 60_000,
+    })) as { command_id?: string };
+  } catch (err: any) {
+    const cliMessage = `cli.update dispatch failed: ${err?.message ?? err}`;
+    console.log(cliMessage);
+    return {
+      machineId,
+      ok: true,
+      message: `agent upgraded to ${observed}; ${cliMessage}`,
+    };
+  }
+
+  const commandId = dispatch.command_id;
+  if (!commandId) {
+    console.log("dispatched (no command_id returned)");
+    return {
+      machineId,
+      ok: true,
+      message: `agent upgraded to ${observed}; cli.update dispatched`,
+    };
+  }
+
+  const result = await waitForCommandResult(machineId, commandId, 20_000);
+  if (!result) {
+    console.log("dispatched (result pending; see `seed fleet audit`)");
+    return {
+      machineId,
+      ok: true,
+      message: `agent upgraded to ${observed}; cli.update dispatched (result pending)`,
+    };
+  }
+  console.log(result.output ?? (result.success ? "ok" : "failed"));
   return {
     machineId,
-    ok: false,
-    message: `timeout; last observed version: ${observed ?? "none"}`,
+    ok: true,
+    message: `agent upgraded to ${observed}; ${result.output ?? (result.success ? "cli.update ok" : "cli.update failed")}`,
   };
+}
+
+/**
+ * Poll the audit log for a command_result matching `commandId`. Returns
+ * null on timeout. Used by cmdUpgrade to surface cli.update outcomes
+ * since the HTTP dispatch is fire-and-forget.
+ */
+async function waitForCommandResult(
+  machineId: string,
+  commandId: string,
+  timeoutMs: number
+): Promise<{ success: boolean; output?: string } | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      const entries = (await apiGet(
+        `/v1/audit?machine_id=${encodeURIComponent(machineId)}&limit=30`
+      )) as Array<{
+        command_id?: string;
+        action?: string;
+        result?: string;
+        details?: string;
+      }>;
+      const match = entries.find(
+        (e) => e.command_id === commandId && e.action === "command_result"
+      );
+      if (match) {
+        return {
+          success: match.result === "success",
+          output: match.details ?? undefined,
+        };
+      }
+    } catch {
+      // keep polling; transient errors are common during upgrades
+    }
+  }
+  return null;
 }
 
 async function cmdUpgrade(args: string[]) {
