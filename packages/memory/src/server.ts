@@ -180,8 +180,14 @@ export function createMemoryApp(deps: MemoryServerDeps): Hono {
 
   // POST /backfill
   app.post("/backfill", async (c) => {
-    const count = await service.backfillEmbeddings();
-    return c.json({ status: "done", backfilled: count });
+    const result = await service.backfillEmbeddings();
+    return c.json({
+      status: "done",
+      backfilled: result.embedded, // kept for backward compat
+      embedded: result.embedded,
+      skipped: result.skipped,
+      total: result.total,
+    });
   });
 
   // POST /backfill-origin {origin, default_source?}
