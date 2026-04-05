@@ -254,3 +254,37 @@ Both packages ran clean on darwin-arm64 (ren3): typecheck clean, 281/0 and 104/0
 - **No lint step.** Repo has no lint config today; out of scope.
 - **gitleaks** runs as a local pre-commit hook but isn't wired into CI. Candidate for a second workflow or an added job here.
 
+---
+
+## Follow-up: issue #38 closed (PR #41)
+
+**PR:** phyter1/seed#41 — `fix(router): wait for port release before MLX respawn (#38)` — OPEN, CI green
+**CI run:** https://github.com/phyter1/seed/actions/runs/24007435596 — ✅ green (fleet/control 281/0, memory 104/0)
+**Deployed:** fleet-router@1.1.1 on ren3, via SCP'd tarball + `PUT /v1/workloads/ren3` (bumping version 1.1.0 → 1.1.1 + new `artifact_url`) + `seed fleet workload install fleet-router --machine ren3`.
+
+### Design decision
+Connect-probe on `:8080` (TCP connect until `ECONNREFUSED`) vs. SIGKILL + `kill -0` poll. Went with connect-probe because it verifies the actual invariant (port bindable) rather than a proxy (process gone ≠ socket released), doesn't require threading the MLX PID through the supervisor, and preserves SIGTERM so MLX can clean up gracefully. SIGKILL would lose in-flight cleanup (leaked semaphores already appear under SIGTERM — SIGKILL would make that worse).
+
+### Supervisor API diff
+- New optional dep: `waitPortFree?: () => Promise<number>` — called on respawn path only (not `start()`), after backoff, before `spawnChild`. Rejections log a warning and spawn anyway (degraded mode beats refusing to respawn).
+- New state field: `lastPortWaitMs: number | null` — surfaced via `/health` (`mlx.supervisor.lastPortWaitMs`).
+- router.ts wires a TCP probe (5s cap, 100ms interval, 200ms per-attempt timeout).
+
+### Live verification (ren3)
+Killed MLX via `pkill -f start-mlx-server.py`. Supervisor log:
+
+```
+[mlx-sup] MLX exited unexpectedly: code=null signal=SIGTERM failures=1 next-backoff=1000ms
+[mlx-sup] port wait complete: 26ms
+[mlx-sup] respawning MLX: attempt #1 thinking=false
+[mlx-server] Starting httpd at 0.0.0.0 on port 8080...
+[mlx-sup] healthy: respawns=1 isHealthy=true backoff reset
+```
+
+Post-recovery `/health`: `{pid:1125, respawnCount:1, consecutiveFailures:0, isHealthy:true, lastPortWaitMs:26}`. **No `OSError: [Errno 48]` in the router log.**
+
+### Surprises
+- **launchctl bootstrap "I/O error 5" is benign.** During deploy, `seed fleet workload install` reported `install_failed` with `Bootstrap failed: 5: Input/output error`, but `launchctl print gui/501/com.seed.fleet-router` showed the service `state = running`. Re-running `launchctl bootstrap` manually produced the same error *while the service was already up and listening on :3000*. So the installer's "failed" status here was a false negative — the error-5 is macOS being noisy about a bootstrap that actually succeeded. Worth a separate issue: the installer probably shouldn't treat exit 5 as hard-failure without confirming the service isn't already in domain. Recovering manually required noticing the service was actually live.
+- **Orphaned MLX children from the previous 1.1.0 install.** Pre-deploy, ren3 had 4 MLX processes from the 1.1.0 workload dir, all attempting port 8080 — direct evidence of the EADDRINUSE race this PR fixes. Killed them before deploying 1.1.1; post-deploy the new MLX starts cleanly.
+- **CI doesn't cover the router package yet.** The EPIC-010 matrix is `packages/fleet/control` + `packages/memory` only. Router unit + E2E tests passed locally but aren't gating this PR. Candidate to add `packages/inference/router` to the matrix.
+
