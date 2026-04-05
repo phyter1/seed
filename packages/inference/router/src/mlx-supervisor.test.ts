@@ -72,6 +72,7 @@ class FakeClock {
 function makeSupervisor(opts: {
   maxConsecutiveFailures?: number;
   backoffSchedule?: number[];
+  waitPortFree?: () => Promise<number>;
 } = {}) {
   const clock = new FakeClock();
   const procs: FakeProc[] = [];
@@ -92,9 +93,14 @@ function makeSupervisor(opts: {
     now: clock.now,
     backoffSchedule: opts.backoffSchedule,
     maxConsecutiveFailures: opts.maxConsecutiveFailures,
+    waitPortFree: opts.waitPortFree,
   });
 
   return { supervisor, clock, procs, spawnCalls, logs };
+}
+
+async function drainMicrotasks(n = 4): Promise<void> {
+  for (let i = 0; i < n; i++) await Promise.resolve();
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -283,6 +289,7 @@ describe("getState snapshot", () => {
       consecutiveFailures: 0,
       isHealthy: false,
       givenUp: false,
+      lastPortWaitMs: null,
     });
   });
 });
@@ -302,6 +309,63 @@ describe("intentional/respawn races", () => {
     procs[1].die(1);
     expect(clock.pendingCount()).toBe(1); // respawn scheduled
     expect(supervisor.getState().consecutiveFailures).toBe(1);
+  });
+});
+
+describe("waitPortFree (issue #38)", () => {
+  test("respawn waits for the port-free probe to resolve before spawning", async () => {
+    let resolvePort: ((ms: number) => void) | null = null;
+    const waitPortFree = () => new Promise<number>((r) => { resolvePort = r; });
+    const { supervisor, procs, clock } = makeSupervisor({ waitPortFree });
+
+    supervisor.start(false);
+    procs[0].die(1);
+    clock.fireNext(); // fire backoff timer
+
+    // Port probe is pending — no new child yet.
+    await drainMicrotasks();
+    expect(procs).toHaveLength(1);
+    expect(supervisor.getState().respawnCount).toBe(0);
+
+    // Port is free; probe resolves with 42ms wait.
+    resolvePort!(42);
+    await drainMicrotasks();
+
+    expect(procs).toHaveLength(2);
+    expect(supervisor.getState().respawnCount).toBe(1);
+    expect(supervisor.getState().lastPortWaitMs).toBe(42);
+  });
+
+  test("probe rejection does not block the respawn (degraded mode)", async () => {
+    let rejectPort: ((err: Error) => void) | null = null;
+    const waitPortFree = () => new Promise<number>((_, rej) => { rejectPort = rej; });
+    const { supervisor, procs, clock, logs } = makeSupervisor({ waitPortFree });
+
+    supervisor.start(false);
+    procs[0].die(1);
+    clock.fireNext();
+
+    await drainMicrotasks();
+    expect(procs).toHaveLength(1);
+
+    rejectPort!(new Error("timeout"));
+    await drainMicrotasks();
+
+    expect(procs).toHaveLength(2);
+    expect(supervisor.getState().respawnCount).toBe(1);
+    expect(logs.some((m) => /port wait failed/i.test(m))).toBe(true);
+  });
+
+  test("start() bypasses waitPortFree (initial boot / external restart)", async () => {
+    let called = 0;
+    const waitPortFree = () => { called += 1; return Promise.resolve(0); };
+    const { supervisor, procs } = makeSupervisor({ waitPortFree });
+
+    supervisor.start(false);
+    await drainMicrotasks();
+
+    expect(procs).toHaveLength(1);
+    expect(called).toBe(0);
   });
 });
 

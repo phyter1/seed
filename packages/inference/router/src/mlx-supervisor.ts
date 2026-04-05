@@ -39,6 +39,13 @@ export interface SupervisorDeps {
   backoffSchedule?: number[];
   /** Give up after this many consecutive failed respawns. Defaults to 10. */
   maxConsecutiveFailures?: number;
+  /**
+   * Probe that resolves (with ms waited) when MLX's TCP port is free, or
+   * rejects on timeout. Called before each *respawn* (not before start()).
+   * If omitted, the supervisor spawns immediately after backoff — the
+   * pre-#38 behaviour, kept for tests that don't care about port races.
+   */
+  waitPortFree?: () => Promise<number>;
 }
 
 export interface SupervisorSnapshot {
@@ -52,6 +59,8 @@ export interface SupervisorSnapshot {
   consecutiveFailures: number;
   isHealthy: boolean;
   givenUp: boolean;
+  /** ms waited for port-free probe on the most recent respawn, or null. */
+  lastPortWaitMs: number | null;
 }
 
 const DEFAULT_BACKOFF = [1000, 2000, 4000, 8000, 16000, 30000];
@@ -65,6 +74,7 @@ export class MlxSupervisor {
   private readonly now: () => number;
   private readonly backoffSchedule: number[];
   private readonly maxFailures: number;
+  private readonly waitPortFree: (() => Promise<number>) | null;
 
   private currentProc: ProcLike | null = null;
   /** The proc whose exit we're expecting (shutdown, toggle). Reset on consumption. */
@@ -80,6 +90,7 @@ export class MlxSupervisor {
   private consecutiveFailures = 0;
   private isHealthy = false;
   private givenUp = false;
+  private lastPortWaitMs: number | null = null;
 
   constructor(deps: SupervisorDeps) {
     this.spawnFn = deps.spawn;
@@ -91,6 +102,7 @@ export class MlxSupervisor {
       ? [...deps.backoffSchedule]
       : [...DEFAULT_BACKOFF];
     this.maxFailures = deps.maxConsecutiveFailures ?? DEFAULT_MAX_FAILURES;
+    this.waitPortFree = deps.waitPortFree ?? null;
   }
 
   /**
@@ -158,6 +170,7 @@ export class MlxSupervisor {
       consecutiveFailures: this.consecutiveFailures,
       isHealthy: this.isHealthy,
       givenUp: this.givenUp,
+      lastPortWaitMs: this.lastPortWaitMs,
     };
   }
 
@@ -202,10 +215,41 @@ export class MlxSupervisor {
     this.respawnTimer = this.setTimeoutFn(() => {
       this.respawnTimer = null;
       if (this.givenUp) return;
+      this.respawnAfterPortFree(thinking);
+    }, delayMs);
+  }
+
+  /**
+   * Wait for the MLX port to be free, then spawn. If no probe is configured,
+   * spawn immediately (pre-#38 behaviour). If the probe rejects (timeout),
+   * log a warning and spawn anyway — we're already degraded, refusing to
+   * respawn would make things worse.
+   */
+  private respawnAfterPortFree(thinking: boolean): void {
+    const doSpawn = () => {
+      if (this.givenUp) return;
       this.respawnCount += 1;
       this.log(`respawning MLX: attempt #${this.respawnCount} thinking=${thinking}`);
       this.spawnChild(thinking);
-    }, delayMs);
+    };
+
+    if (!this.waitPortFree) {
+      doSpawn();
+      return;
+    }
+
+    this.waitPortFree().then(
+      (waitMs) => {
+        this.lastPortWaitMs = waitMs;
+        this.log(`port wait complete: ${waitMs}ms`);
+        doSpawn();
+      },
+      (err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.log(`port wait failed: ${msg}. spawning anyway (degraded).`);
+        doSpawn();
+      },
+    );
   }
 
   private cancelRespawnTimer(): void {
