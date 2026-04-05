@@ -1,6 +1,6 @@
 /**
  * Embedding client. Calls ollama's qwen3-embedding:0.6b model to produce
- * 384-dim embeddings. On the memory host (ren1) this is a localhost call.
+ * 1024-dim embeddings. On the memory host (ren1) this is a localhost call.
  *
  * Model is kept warm on ren1 via OLLAMA_KEEP_ALIVE=-1, so latency is ~20ms
  * after the first call.
