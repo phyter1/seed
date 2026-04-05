@@ -203,6 +203,47 @@ async function readStream(stream: ReadableStream<Uint8Array>): Promise<string> {
   return await new Response(stream).text();
 }
 
+/**
+ * Determine the LAN IP the agent would use to reach the control plane.
+ * We open a UDP socket, connect it to the target (no packets sent —
+ * connect on a datagram socket just tells the kernel the route), and
+ * read back the local address. Works on macOS and Linux without any
+ * shelling out or interface enumeration.
+ */
+async function getLanIp(controlUrl: string): Promise<string | undefined> {
+  try {
+    const url = new URL(controlUrl.replace(/^ws/, "http"));
+    const targetHost = url.hostname;
+    const targetPort = url.port ? parseInt(url.port, 10) : 80;
+    const { createSocket } = await import("node:dgram");
+    return await new Promise<string | undefined>((resolve) => {
+      const socket = createSocket("udp4");
+      socket.on("error", () => {
+        socket.close();
+        resolve(undefined);
+      });
+      socket.connect(targetPort, targetHost, () => {
+        try {
+          const addr = socket.address();
+          socket.close();
+          resolve(addr.address || undefined);
+        } catch {
+          socket.close();
+          resolve(undefined);
+        }
+      });
+      // Safety timeout — connect() resolution is routing-table lookup,
+      // should be instant, but don't hang the agent on DNS weirdness.
+      setTimeout(() => {
+        try { socket.close(); } catch {}
+        resolve(undefined);
+      }, 2000);
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 async function getHostname(): Promise<string> {
   const proc = Bun.spawn(["hostname"], { stdout: "pipe" });
   return (await readStream(proc.stdout)).trim();
@@ -876,20 +917,25 @@ async function runAgent() {
       attempt = 0;
       console.log("[agent] connected to control plane");
 
-      // Send announce
-      const announce: AnnounceMessage = {
-        type: "announce",
-        machine_id: config.machineId,
-        hostname,
-        arch,
-        cpu_cores: cpuCores,
-        memory_gb: memoryGb,
-        platform,
-        agent_version: AGENT_VERSION,
-        config_version: cachedConfigVersion,
-        capabilities: detectCapabilities(),
-      };
-      ws!.send(JSON.stringify(announce));
+      // Send announce — include LAN IP if we can resolve one.
+      getLanIp(config.controlUrl).then((lanIp) => {
+        const announce: AnnounceMessage = {
+          type: "announce",
+          machine_id: config.machineId,
+          hostname,
+          arch,
+          cpu_cores: cpuCores,
+          memory_gb: memoryGb,
+          platform,
+          agent_version: AGENT_VERSION,
+          config_version: cachedConfigVersion,
+          capabilities: detectCapabilities(),
+          ...(lanIp ? { lan_ip: lanIp } : {}),
+        };
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(announce));
+        }
+      });
 
       // Start health reporting
       if (healthInterval) clearInterval(healthInterval);

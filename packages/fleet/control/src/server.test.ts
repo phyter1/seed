@@ -384,8 +384,11 @@ describe("service discovery endpoint", () => {
     expect(res.status).toBe(404);
   });
 
-  test("returns service URL from config", async () => {
-    db.registerMachine("ren1", "ren1.local");
+  test("returns service URL from config (no lan_ip reported yet)", async () => {
+    // display_name is a human label — it MUST NOT be used as a URL
+    // component. When the agent hasn't reported a lan_ip, fall back
+    // to the machine_id and let the caller's resolver deal with it.
+    db.registerMachine("ren1", "Ren 1 (Intel i9)");
     await put("/v1/config", {
       key: "services.memory",
       value: { host: "ren1", port: 19888, probe: { type: "http", path: "/status" } },
@@ -395,12 +398,26 @@ describe("service discovery endpoint", () => {
     const data = await res.json();
     expect(data.service_id).toBe("memory");
     expect(data.machine_id).toBe("ren1");
-    expect(data.host).toBe("ren1.local");
+    expect(data.host).toBe("ren1");
     expect(data.port).toBe(19888);
-    expect(data.url).toBe("http://ren1.local:19888");
-    // No health reported yet → unhealthy
+    expect(data.url).toBe("http://ren1:19888");
     expect(data.healthy).toBe(false);
     expect(data.connected).toBe(false);
+  });
+
+  test("returns service URL with lan_ip when agent has reported it", async () => {
+    db.registerMachine("ren1", "Ren 1 (Intel i9)");
+    db.updateMachineInfo("ren1", { lan_ip: "192.168.1.42" });
+    await put("/v1/config", {
+      key: "services.memory",
+      value: { host: "ren1", port: 19888, probe: { type: "http", path: "/status" } },
+    });
+    const res = await req("/v1/services/memory");
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.host).toBe("192.168.1.42");
+    expect(data.url).toBe("http://192.168.1.42:19888");
+    expect(data.machine_id).toBe("ren1");
   });
 
   test("healthy=true when last_health reports service as accepting_connections", async () => {

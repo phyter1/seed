@@ -459,9 +459,13 @@ export function createApp(state: ControlPlaneState): Hono {
     const host = value.host;
     const port = value.port;
     const machine = db.getMachine(host);
-    // host in config is the machine_id; the reachable hostname prefers
-    // machines.display_name if set, falling back to the id.
-    const hostname = machine?.display_name ?? host;
+    // `host` in config is the machine_id. The reachable endpoint is,
+    // in priority order:
+    //   1. lan_ip the agent reported on announce (IP, never flaky mDNS)
+    //   2. machine_id (only resolvable if /etc/hosts or DNS has it)
+    // display_name is NEVER used for URL construction — it's a human
+    // label that may contain spaces, parens, etc.
+    const hostname = machine?.lan_ip ?? host;
     // Services are HTTP today; if that changes, add scheme to config.
     const url = `http://${hostname}:${port}`;
 
@@ -1078,7 +1082,7 @@ export async function handleWsMessage(
 
   if (msg.type === "announce") {
     const {
-      machine_id, arch, memory_gb, platform, agent_version, config_version,
+      machine_id, arch, memory_gb, platform, agent_version, config_version, lan_ip,
     } = msg;
 
     // Auth check
@@ -1155,6 +1159,7 @@ export async function handleWsMessage(
       memory_gb,
       agent_version,
       config_version,
+      ...(lan_ip ? { lan_ip } : {}),
     });
 
     console.log(`[control] ${machine_id} connected (${platform}/${arch}, ${memory_gb}GB)`);
