@@ -6,6 +6,7 @@ export class MLXOpenAICompatibleProviderAdapter extends BaseProviderAdapter {
       id: "mlx_openai_compatible",
       displayName: "MLX (OpenAI-compatible)",
       locality: "local",
+      tier: "local",
       capabilities: {
         tools: false,
         structuredOutput: false,

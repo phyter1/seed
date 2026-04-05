@@ -3,28 +3,28 @@ import { resolveApiKey } from "../env-keys";
 import { invokeOpenAICompatible, listOpenAICompatibleModels } from "../openai-compatible-client";
 import type { ProviderInvocationOptions, ProviderInvocationResult } from "../types";
 
-const DEFAULT_BASE_URL = "https://api.openai.com/v1";
+const DEFAULT_BASE_URL = "https://api.groq.com/openai/v1";
 
-export class OpenAIProviderAdapter extends BaseProviderAdapter {
+export class GroqProviderAdapter extends BaseProviderAdapter {
   constructor() {
     super({
-      id: "openai",
-      displayName: "OpenAI",
+      id: "groq",
+      displayName: "Groq",
       locality: "cloud",
-      tier: "frontier",
+      tier: "midtier",
       defaultBaseUrl: DEFAULT_BASE_URL,
       capabilities: {
         tools: true,
         structuredOutput: true,
-        vision: true,
+        vision: false,
         reasoning: true,
       },
-      notes: ["Cloud provider for GPT-family models and Codex-aligned backends."],
+      notes: ["LPU-accelerated inference for Llama-family and Mixtral via OpenAI-compatible API."],
     });
   }
 
   override async listModels(): Promise<string[]> {
-    const apiKey = resolveApiKey("openai");
+    const apiKey = resolveApiKey("groq");
     return listOpenAICompatibleModels(this.defaultBaseUrl ?? DEFAULT_BASE_URL, apiKey);
   }
 
@@ -38,7 +38,7 @@ export class OpenAIProviderAdapter extends BaseProviderAdapter {
   }
 
   override async invoke(options: ProviderInvocationOptions): Promise<ProviderInvocationResult> {
-    const apiKey = resolveApiKey("openai", options.apiKey);
+    const apiKey = resolveApiKey("groq", options.apiKey);
     return invokeOpenAICompatible({
       baseUrl: options.baseUrl ?? this.defaultBaseUrl ?? DEFAULT_BASE_URL,
       apiKey,

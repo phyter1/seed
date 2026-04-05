@@ -4,6 +4,7 @@ const providers = listProviderAdapters().map((provider) => ({
   id: provider.id,
   displayName: provider.displayName,
   locality: provider.locality,
+  tier: provider.tier,
   defaultBaseUrl: provider.defaultBaseUrl,
   capabilities: provider.capabilities,
   notes: provider.notes ?? [],

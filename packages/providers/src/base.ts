@@ -4,6 +4,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
   id: ProviderDefinition["id"];
   displayName: string;
   locality: ProviderDefinition["locality"];
+  tier: ProviderDefinition["tier"];
   defaultBaseUrl?: string;
   capabilities: ProviderCapabilities;
   notes?: string[];
@@ -12,6 +13,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
     this.id = definition.id;
     this.displayName = definition.displayName;
     this.locality = definition.locality;
+    this.tier = definition.tier;
     this.defaultBaseUrl = definition.defaultBaseUrl;
     this.capabilities = definition.capabilities;
     this.notes = definition.notes;
