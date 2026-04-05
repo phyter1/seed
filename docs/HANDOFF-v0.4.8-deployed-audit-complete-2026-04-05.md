@@ -224,3 +224,33 @@ Created `packages/inference/router/README.md` (commit `d764490`) noting that `di
 - README note: committed to main
 - Working tree clean
 
+---
+
+## Follow-up session 2026-04-05 — EPIC-010 (CI on PRs) shipped
+
+### Workflow added
+- File: `.github/workflows/test.yml`
+- Triggers: `pull_request` → main, `push` → main
+- Matrix over `packages/fleet/control` and `packages/memory`, `fail-fast: false`
+- Each job: `bun install` → `bunx tsc --noEmit` → `bun test`
+- Runner: `ubuntu-latest`; bun pin: `latest` (mirrors `release.yml`)
+
+### Proof-of-life PR
+- **PR:** phyter1/seed#40 — `ci: add test workflow for PRs (EPIC-010)` — OPEN, awaiting Ryan's merge
+- **Run:** https://github.com/phyter1/seed/actions/runs/24007182301 — ✅ green
+  - `test (packages/fleet/control)`: 15s, 281 tests pass
+  - `test (packages/memory)`: 9s, 104 tests pass
+
+### Local verification before push
+Both packages ran clean on darwin-arm64 (ren3): typecheck clean, 281/0 and 104/0 respectively. No adjustments needed for CI.
+
+### Surprises
+- Test counts have drifted up from the numbers in the orchestrator prompt (269 → 281 for fleet/control). Suggests the "~28 skipped tests" bucket from GAPS is still real but shrinking.
+- `actions/checkout@v4` emits a Node.js 20 deprecation warning on runs. Same action pinned in `release.yml`, so not a regression introduced here; worth a separate bump of both workflows to `@v5` (or setting `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true`) before Sept 2026.
+
+### Deferred
+- **Bun install cache** — not configured here. `release.yml` doesn't cache either; if PR volume grows, caching `~/.bun/install/cache` keyed on `bun.lock` per package would shave a few seconds off each job.
+- **No coverage step.** Scope was bounded to typecheck + test.
+- **No lint step.** Repo has no lint config today; out of scope.
+- **gitleaks** runs as a local pre-commit hook but isn't wired into CI. Candidate for a second workflow or an added job here.
+
