@@ -1,0 +1,9 @@
+{
+  "name": "@seed/fleet-topology",
+  "version": "0.1.0",
+  "description": "Static (file-drop) workload that deposits seed.config.json on a fleet machine. Decouples fleet topology from router release cadence.",
+  "type": "module",
+  "scripts": {
+    "build:artifact": "bash scripts/build-artifact.sh"
+  }
+}

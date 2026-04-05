@@ -896,6 +896,12 @@ async function runAgent() {
       }
       const r = workloadDb.get(workloadId);
       if (!r) return { success: false, output: `not installed: ${workloadId}` };
+      if (r.supervisor_label === "") {
+        return {
+          success: false,
+          output: `${workloadId} is a static workload (no supervisor to reload)`,
+        };
+      }
       const plistPath = `${process.env.HOME}/Library/LaunchAgents/${r.supervisor_label}.plist`;
       try {
         await supervisorDriver.unload(r.supervisor_label);
@@ -964,7 +970,12 @@ async function runAgent() {
       const r = workloadDb.get(workloadId);
       if (!r) return { success: true, output: `not installed: ${workloadId}` };
       try {
-        await supervisorDriver.unload(r.supervisor_label);
+        // Static workloads have no supervisor to unload — just drop
+        // the record. (The install-dir and symlink remain until
+        // workload.gc removes them.)
+        if (r.supervisor_label !== "") {
+          await supervisorDriver.unload(r.supervisor_label);
+        }
         workloadDb.delete(workloadId);
         return { success: true, output: `removed ${workloadId}` };
       } catch (err: any) {

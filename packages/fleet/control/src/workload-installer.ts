@@ -23,6 +23,7 @@ import type {
   WorkloadDeclaration,
   WorkloadInstallRecord,
 } from "./types";
+import { isStaticWorkload } from "./types";
 import type { SupervisorDriver } from "./supervisors/launchd";
 import { renderTemplate, resolveEnv, renderPlistEnvDict } from "./templates";
 
@@ -445,6 +446,37 @@ function computeRetainedVersions(
   return retain;
 }
 
+/**
+ * Maintain the `${workloadId}-current` symlink pointing at the
+ * install dir for `currentVersion`. Atomic: writes to `.tmp` and
+ * renames over any existing symlink. A non-existent installRoot is
+ * a no-op. Safe to call repeatedly.
+ *
+ * Consumers (routers, other workloads, operators) can read through
+ * `${installRoot}/${workloadId}-current/...` for a path that follows
+ * the latest install without encoding the version.
+ */
+export function updateCurrentSymlink(
+  installRoot: string,
+  workloadId: string,
+  currentVersion: string
+): void {
+  if (!existsSync(installRoot)) return;
+  const linkPath = join(installRoot, `${workloadId}-current`);
+  const target = `${workloadId}-${currentVersion}`; // relative target
+  const { symlinkSync, renameSync, lstatSync } = require("node:fs") as typeof import("node:fs");
+  const tmpLink = `${linkPath}.tmp`;
+  // Clean up any stale tmp link.
+  try {
+    lstatSync(tmpLink);
+    rmSync(tmpLink, { force: true });
+  } catch {
+    // not present, continue
+  }
+  symlinkSync(target, tmpLink);
+  renameSync(tmpLink, linkPath);
+}
+
 function homeDir(): string {
   const h = process.env.HOME;
   if (!h) throw new Error("HOME not set");
@@ -524,68 +556,107 @@ export async function installWorkload(
   // 5. Verify checksums of extracted files.
   verifyInstalledChecksums(manifest, installDir);
 
-  // 6. Ensure binary is executable.
-  const binaryPath = join(installDir, manifest.binary);
-  if (!existsSync(binaryPath)) {
-    throw new Error(`binary ${manifest.binary} not found in install dir`);
-  }
-  const { chmodSync } = await import("node:fs");
-  chmodSync(binaryPath, 0o755);
-  if (manifest.sidecars) {
-    for (const s of manifest.sidecars) {
-      const sp = join(installDir, s.dest_rel);
-      if (existsSync(sp)) chmodSync(sp, 0o755);
+  // Static workloads branch here: no binary, no supervisor, no plist.
+  // The install phase itself IS the workload — files are extracted to
+  // installDir and the `${id}-current` symlink is moved to point at
+  // it, and that's the whole lifecycle. Consumers read through the
+  // stable symlink path.
+  let plistPath = "";
+  let supervisorLabel = "";
+  let state: WorkloadInstallRecord["state"] = "loaded";
+
+  if (isStaticWorkload(manifest)) {
+    state = "installed";
+    // Static workloads may still include sidecar chmod hints (e.g. for
+    // scripts), but there is no main binary to chmod.
+    if (manifest.sidecars) {
+      const { chmodSync } = await import("node:fs");
+      for (const s of manifest.sidecars) {
+        const sp = join(installDir, s.dest_rel);
+        if (existsSync(sp)) chmodSync(sp, 0o755);
+      }
     }
+  } else {
+    // 6. Ensure binary is executable.
+    if (!manifest.binary) {
+      throw new Error(
+        `manifest missing binary (required for kind="service")`
+      );
+    }
+    const binaryPath = join(installDir, manifest.binary);
+    if (!existsSync(binaryPath)) {
+      throw new Error(`binary ${manifest.binary} not found in install dir`);
+    }
+    const { chmodSync } = await import("node:fs");
+    chmodSync(binaryPath, 0o755);
+    if (manifest.sidecars) {
+      for (const s of manifest.sidecars) {
+        const sp = join(installDir, s.dest_rel);
+        if (existsSync(sp)) chmodSync(sp, 0o755);
+      }
+    }
+
+    // 7. Render the launchd template.
+    const supervisor = manifest.supervisor?.launchd;
+    if (!supervisor) {
+      throw new Error(
+        "manifest missing supervisor.launchd — Phase 1 is macOS-only"
+      );
+    }
+    const templatePath = join(installDir, supervisor.template);
+    if (!existsSync(templatePath)) {
+      throw new Error(`supervisor template not found: ${supervisor.template}`);
+    }
+    const template = readFileSync(templatePath, "utf-8");
+
+    const logPath = join(logDir, `${supervisor.label}.log`);
+    const tokens: Record<string, string> = {
+      BINARY: binaryPath,
+      INSTALL_DIR: installDir,
+      INSTALL_ROOT: installRoot,
+      HOME: homeDir(),
+      LABEL: supervisor.label,
+      LOG_PATH: logPath,
+    };
+
+    // Resolve env (manifest defaults ← declaration overrides, then expand
+    // {{install_dir}}-style placeholders against our token map).
+    const env = resolveEnv(manifest.env, declaration.env, tokens);
+    tokens.ENV = renderPlistEnvDict(env);
+
+    const renderedPlist = renderTemplate(template, tokens);
+
+    // 8. Write the plist atomically.
+    mkdirSync(plistDir, { recursive: true });
+    mkdirSync(dirname(logPath), { recursive: true });
+    plistPath = join(plistDir, `${supervisor.label}.plist`);
+    const tmpPlist = `${plistPath}.tmp`;
+    writeFileSync(tmpPlist, renderedPlist, { mode: 0o644 });
+    const { renameSync } = await import("node:fs");
+    renameSync(tmpPlist, plistPath);
+
+    // 9. Unload first to make this idempotent for same-version reloads,
+    //    then bootstrap.
+    await opts.driver.unload(supervisor.label);
+    await opts.driver.load(supervisor.label, plistPath);
+
+    supervisorLabel = supervisor.label;
   }
 
-  // 7. Render the launchd template.
-  const supervisor = manifest.supervisor.launchd;
-  if (!supervisor) {
-    throw new Error("manifest missing supervisor.launchd — Phase 1 is macOS-only");
-  }
-  const templatePath = join(installDir, supervisor.template);
-  if (!existsSync(templatePath)) {
-    throw new Error(`supervisor template not found: ${supervisor.template}`);
-  }
-  const template = readFileSync(templatePath, "utf-8");
-
-  const logPath = join(logDir, `${supervisor.label}.log`);
-  const tokens: Record<string, string> = {
-    BINARY: binaryPath,
-    INSTALL_DIR: installDir,
-    HOME: homeDir(),
-    LABEL: supervisor.label,
-    LOG_PATH: logPath,
-  };
-
-  // Resolve env (manifest defaults ← declaration overrides, then expand
-  // {{install_dir}}-style placeholders against our token map).
-  const env = resolveEnv(manifest.env, declaration.env, tokens);
-  tokens.ENV = renderPlistEnvDict(env);
-
-  const renderedPlist = renderTemplate(template, tokens);
-
-  // 8. Write the plist atomically.
-  mkdirSync(plistDir, { recursive: true });
-  mkdirSync(dirname(logPath), { recursive: true });
-  const plistPath = join(plistDir, `${supervisor.label}.plist`);
-  const tmpPlist = `${plistPath}.tmp`;
-  writeFileSync(tmpPlist, renderedPlist, { mode: 0o644 });
-  const { renameSync } = await import("node:fs");
-  renameSync(tmpPlist, plistPath);
-
-  // 9. Unload first to make this idempotent for same-version reloads,
-  //    then bootstrap.
-  await opts.driver.unload(supervisor.label);
-  await opts.driver.load(supervisor.label, plistPath);
+  // Move the `${id}-current` symlink to point at this install. Both
+  // static and service workloads maintain this so consumers on the
+  // same machine can read through a stable path that does not encode
+  // the version (routers referring to a shared config, operators
+  // inspecting latest install, etc.).
+  updateCurrentSymlink(installRoot, manifest.id, manifest.version);
 
   const record: WorkloadInstallRecord = {
     workload_id: manifest.id,
     version: manifest.version,
     install_dir: installDir,
-    supervisor_label: supervisor.label,
+    supervisor_label: supervisorLabel,
     installed_at: new Date().toISOString(),
-    state: "loaded",
+    state,
     failure_reason: null,
     last_probe_at: null,
     last_probe_tier: null,

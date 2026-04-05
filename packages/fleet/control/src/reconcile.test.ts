@@ -122,4 +122,29 @@ describe("planReconcile", () => {
       expect(routerAction.reason).toBe("version_mismatch");
     }
   });
+
+  test("static workload (empty supervisor_label) never emits drift/reload", () => {
+    // A static (file-drop) workload has no supervisor, so an empty
+    // loadedLabels set is the correct steady state — it must not be
+    // flagged as drift.
+    const actions = planReconcile({
+      declared: [decl("fleet-topology", "0.1.0")],
+      installed: [installed("fleet-topology", "0.1.0", "")],
+      loadedLabels: new Set(),
+    });
+    expect(actions).toEqual([]);
+  });
+
+  test("static workload at mismatched version still re-installs", () => {
+    const actions = planReconcile({
+      declared: [decl("fleet-topology", "0.2.0")],
+      installed: [installed("fleet-topology", "0.1.0", "")],
+      loadedLabels: new Set(),
+    });
+    expect(actions).toHaveLength(1);
+    expect(actions[0]?.kind).toBe("install");
+    if (actions[0]?.kind === "install") {
+      expect(actions[0].reason).toBe("version_mismatch");
+    }
+  });
 });

@@ -36,8 +36,10 @@ export interface ReconcileSummary {
 async function listLoadedLabels(driver: SupervisorDriver, records: WorkloadInstallRecord[]): Promise<Set<string>> {
   // We only need to know about labels we care about. Query status
   // per-record to avoid parsing `launchctl list` (no label filter).
+  // Static workloads have no label — skip them.
   const loaded = new Set<string>();
   for (const r of records) {
+    if (r.supervisor_label === "") continue;
     if (await driver.isLoaded(r.supervisor_label)) {
       loaded.add(r.supervisor_label);
     }
