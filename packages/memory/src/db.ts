@@ -512,6 +512,43 @@ export class MemoryDB {
       .run(memoryId, MemoryDB.serializeFloat32(embedding));
   }
 
+  /**
+   * Insert an embedding into vec_memories, classifying any failure into
+   * a discrete reason instead of throwing. Non-pk_conflict failures are
+   * logged at warn level with the memory_id so operators can investigate.
+   *
+   * Exists as a single handler to replace the call-site try/catch
+   * fan-out that accumulated while chasing the vec0 LEFT JOIN / INSERT
+   * PK disagreement in backfill paths. Having all vec inserts flow
+   * through one place means: (a) the policy lives in one location;
+   * (b) skipped rows are classified, not silently swallowed; and
+   * (c) non-PK errors (dim mismatch, zero-length, NaN) surface in
+   * logs instead of hiding behind a bare catch.
+   */
+  safeInsertEmbedding(
+    memoryId: number,
+    embedding: number[]
+  ): InsertEmbeddingResult {
+    if (!this.hasVec) {
+      return { ok: false, reason: "no_vec_extension", error: "vec extension not loaded" };
+    }
+    try {
+      this.db
+        .prepare("INSERT INTO vec_memories (memory_id, embedding) VALUES (?, ?)")
+        .run(memoryId, MemoryDB.serializeFloat32(embedding));
+      return { ok: true };
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      const reason = classifyEmbeddingInsertError(message);
+      if (reason !== "pk_conflict") {
+        console.warn(
+          `[memory] vec insert skipped memory_id=${memoryId} reason=${reason}: ${message}`
+        );
+      }
+      return { ok: false, reason, error: message };
+    }
+  }
+
   memoriesMissingEmbeddings(): Array<{
     id: number;
     summary: string;
@@ -785,4 +822,74 @@ export class MemoryDB {
     sql += " ORDER BY name";
     return this.db.prepare(sql).all(...params) as Entity[];
   }
+}
+
+// --- Embedding insert classification ---------------------------------
+
+/**
+ * Discrete reasons a `safeInsertEmbedding` call can be skipped instead
+ * of succeeding. Each corresponds to a known failure mode of either
+ * the vec0 virtual table or the caller-supplied embedding buffer.
+ *
+ * `pk_conflict` is the one we expected and tolerate silently. Every
+ * other reason indicates a caller bug or a vec0 surprise worth
+ * investigating — those are logged.
+ */
+export type InsertEmbeddingSkipReason =
+  | "pk_conflict"
+  | "dim_mismatch"
+  | "zero_length"
+  | "nan_or_inf"
+  | "no_vec_extension"
+  | "other";
+
+export const INSERT_EMBEDDING_SKIP_REASONS: InsertEmbeddingSkipReason[] = [
+  "pk_conflict",
+  "dim_mismatch",
+  "zero_length",
+  "nan_or_inf",
+  "no_vec_extension",
+  "other",
+];
+
+export type InsertEmbeddingResult =
+  | { ok: true }
+  | { ok: false; reason: InsertEmbeddingSkipReason; error: string };
+
+/**
+ * Classify an error message from a failed vec_memories INSERT into a
+ * discrete skip reason. Pattern-matches bun:sqlite + sqlite-vec error
+ * text; anything unrecognized falls through to "other".
+ */
+export function classifyEmbeddingInsertError(
+  message: string
+): InsertEmbeddingSkipReason {
+  const m = message.toLowerCase();
+  if (m.includes("unique constraint") && m.includes("vec_memories")) {
+    return "pk_conflict";
+  }
+  if (m.includes("dimension mismatch")) return "dim_mismatch";
+  if (m.includes("zero-length") || m.includes("zero length")) {
+    return "zero_length";
+  }
+  if (
+    m.includes("nan") ||
+    m.includes("infinity") ||
+    /\binfinite\b/.test(m) ||
+    m.includes("non-finite")
+  ) {
+    return "nan_or_inf";
+  }
+  return "other";
+}
+
+export function emptySkipCounts(): Record<InsertEmbeddingSkipReason, number> {
+  return {
+    pk_conflict: 0,
+    dim_mismatch: 0,
+    zero_length: 0,
+    nan_or_inf: 0,
+    no_vec_extension: 0,
+    other: 0,
+  };
 }

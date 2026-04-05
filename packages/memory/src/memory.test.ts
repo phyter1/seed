@@ -2,7 +2,7 @@ import { describe, expect, test, beforeEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MemoryDB } from "./db";
+import { MemoryDB, classifyEmbeddingInsertError } from "./db";
 import { MemoryService } from "./memory";
 import { createFakeEmbedder, createFakeLLM } from "./test-helpers";
 import { chunkText, CHUNK_THRESHOLD } from "./chunk";
@@ -883,9 +883,11 @@ describe("MemoryService.backfillEmbeddings (chunk path)", () => {
     expect(db.hasEmbedding(strandedChildId)).toBe(false);
     expect(db.chunksMissingEmbeddings().map((r) => r.id)).toEqual([strandedChildId]);
 
-    const count = await service.backfillEmbeddings();
+    const result = await service.backfillEmbeddings();
 
-    expect(count).toBe(1);
+    expect(result.embedded).toBe(1);
+    expect(result.total).toBe(1);
+    expect(Object.values(result.skipped).every((n) => n === 0)).toBe(true);
     expect(db.hasEmbedding(strandedChildId)).toBe(true);
     expect(db.chunksMissingEmbeddings()).toHaveLength(0);
   });
@@ -910,7 +912,130 @@ describe("MemoryService.backfillEmbeddings (chunk path)", () => {
       embedding: Array(1024).fill(0.2),
     });
 
-    const count = await service.backfillEmbeddings();
-    expect(count).toBe(0);
+    const result = await service.backfillEmbeddings();
+    expect(result.embedded).toBe(0);
+    expect(result.total).toBe(0);
+  });
+});
+
+describe("classifyEmbeddingInsertError", () => {
+  test("pk_conflict — vec0 UNIQUE constraint message", () => {
+    expect(
+      classifyEmbeddingInsertError(
+        "UNIQUE constraint failed on vec_memories primary key"
+      )
+    ).toBe("pk_conflict");
+    expect(
+      classifyEmbeddingInsertError(
+        "constraint failed: UNIQUE constraint failed on vec_memories primary key"
+      )
+    ).toBe("pk_conflict");
+  });
+
+  test("pk_conflict does NOT match non-vec UNIQUE violations", () => {
+    // A UNIQUE violation on some other table should not be tagged as
+    // pk_conflict — we'd want to see it.
+    expect(
+      classifyEmbeddingInsertError(
+        "UNIQUE constraint failed: entities.name"
+      )
+    ).toBe("other");
+  });
+
+  test("dim_mismatch — vec0 dimension rejection", () => {
+    expect(
+      classifyEmbeddingInsertError(
+        'Dimension mismatch for inserted vector for the "embedding" column. Expected 1024 dimensions but received 512.'
+      )
+    ).toBe("dim_mismatch");
+  });
+
+  test("zero_length — vec0 empty buffer rejection", () => {
+    expect(
+      classifyEmbeddingInsertError(
+        'Inserted vector for the "embedding" column is invalid: zero-length vectors are not supported.'
+      )
+    ).toBe("zero_length");
+  });
+
+  test("nan_or_inf — NaN / Infinity rejection", () => {
+    expect(classifyEmbeddingInsertError("contains NaN value")).toBe(
+      "nan_or_inf"
+    );
+    expect(
+      classifyEmbeddingInsertError("non-finite float encountered")
+    ).toBe("nan_or_inf");
+    expect(classifyEmbeddingInsertError("Infinity not allowed")).toBe(
+      "nan_or_inf"
+    );
+  });
+
+  test("other — unrecognized errors fall through", () => {
+    expect(classifyEmbeddingInsertError("disk I/O error")).toBe("other");
+    expect(classifyEmbeddingInsertError("database is locked")).toBe("other");
+    expect(classifyEmbeddingInsertError("")).toBe("other");
+  });
+});
+
+describe("MemoryDB.safeInsertEmbedding", () => {
+  let db: MemoryDB;
+  beforeEach(() => {
+    db = new MemoryDB(":memory:");
+  });
+
+  test("ok:true on clean insert", () => {
+    if (!db.hasVec) return; // skip if vec extension not loaded
+    const result = db.safeInsertEmbedding(1, Array(1024).fill(0.1));
+    expect(result.ok).toBe(true);
+    expect(db.hasEmbedding(1)).toBe(true);
+  });
+
+  test("pk_conflict on re-insert same memory_id", () => {
+    if (!db.hasVec) return;
+    db.insertEmbedding(1, Array(1024).fill(0.1));
+    const result = db.safeInsertEmbedding(1, Array(1024).fill(0.2));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("pk_conflict");
+    }
+    // First embedding is unchanged.
+    expect(db.hasEmbedding(1)).toBe(true);
+  });
+
+  test("dim_mismatch when embedding length disagrees with column dim", () => {
+    if (!db.hasVec) return;
+    // Configured dim is 1024; send 512.
+    const result = db.safeInsertEmbedding(1, Array(512).fill(0.1));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("dim_mismatch");
+    }
+    expect(db.hasEmbedding(1)).toBe(false);
+  });
+
+  test("zero_length on empty embedding", () => {
+    if (!db.hasVec) return;
+    const result = db.safeInsertEmbedding(1, []);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("zero_length");
+    }
+  });
+
+  test("no_vec_extension returns structured skip (not a throw)", () => {
+    // Construct a MemoryDB whose hasVec is false by using an impossible
+    // sqlite path override — this forces sqlite-vec load to fail.
+    // Easiest is to monkey-patch, but simpler: just assert the fallback
+    // behavior when hasVec is false.
+    if (db.hasVec) {
+      // We can't easily force hasVec=false here, but we can exercise
+      // the branch by stubbing. Skip the cross-state assertion.
+      return;
+    }
+    const result = db.safeInsertEmbedding(1, Array(1024).fill(0.1));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("no_vec_extension");
+    }
   });
 });

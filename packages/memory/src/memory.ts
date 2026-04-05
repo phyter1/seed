@@ -1,4 +1,8 @@
-import { MemoryDB } from "./db";
+import {
+  MemoryDB,
+  emptySkipCounts,
+  type InsertEmbeddingSkipReason,
+} from "./db";
 import type { EmbedClient } from "./embed";
 import type { LLMClient } from "./summarize";
 import {
@@ -21,6 +25,20 @@ import type {
 } from "./types";
 
 export const DEDUP_THRESHOLD = 0.85;
+
+/**
+ * Result of MemoryService.backfillEmbeddings. `embedded` is the count
+ * of rows where INSERT INTO vec_memories succeeded. `skipped` breaks
+ * down by reason — pk_conflict is the benign case where the vec row
+ * already exists; anything else merits investigation (logged at warn).
+ * `total` = embedded + sum(skipped) = the number of rows backfill
+ * attempted to embed this run.
+ */
+export interface BackfillResult {
+  embedded: number;
+  skipped: Record<InsertEmbeddingSkipReason, number>;
+  total: number;
+}
 
 export interface MemoryServiceOptions {
   db: MemoryDB;
@@ -463,10 +481,19 @@ export class MemoryService {
 
   // --- Backfill -------------------------------------------------------
 
-  async backfillEmbeddings(): Promise<number> {
-    if (!this.db.hasVec) return 0;
+  async backfillEmbeddings(): Promise<BackfillResult> {
+    const skipped = emptySkipCounts();
+    let embedded = 0;
+    const record = (result: { ok: boolean; reason?: InsertEmbeddingSkipReason }) => {
+      if (result.ok) embedded++;
+      else skipped[result.reason!]++;
+    };
+
+    if (!this.db.hasVec) {
+      return { embedded: 0, skipped, total: 0 };
+    }
+
     const rows = this.db.memoriesMissingEmbeddings();
-    let count = 0;
     for (const row of rows) {
       if (this.db.hasChildren(row.id)) continue;
       const chunks = chunkText(row.raw_text);
@@ -476,37 +503,34 @@ export class MemoryService {
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i]!;
           const emb = await this.embedder.embed(chunk);
-          try {
-            this.db.storeMemory({
-              raw_text: chunk,
-              summary: `[Chunk ${i + 1}/${chunks.length}] ${row.summary.slice(0, 100)}`,
-              entities,
-              topics,
-              importance: row.importance,
-              source: row.source,
-              project: row.project,
-              embedding: emb,
-              parent_id: row.id,
-              source_url: row.source_url,
-              fetched_at: row.fetched_at,
-              refresh_policy: row.refresh_policy as RefreshPolicy | null,
-              content_hash: row.content_hash,
-              origin: row.origin as Origin | null,
-            });
-            count++;
-          } catch {
-            // Same vec0 LEFT-JOIN quirk as below — tolerate stale PK collisions.
-          }
+          // Persist the chunk row first (no embedding), then attempt
+          // the vec insert separately. This decouples the memories
+          // INSERT from the vec_memories INSERT so that a vec failure
+          // does NOT roll back the chunk row — the chunk stays and
+          // becomes eligible for re-embed on the next backfill run,
+          // while the failure reason is logged for investigation.
+          const mid = this.db.storeMemory({
+            raw_text: chunk,
+            summary: `[Chunk ${i + 1}/${chunks.length}] ${row.summary.slice(0, 100)}`,
+            entities,
+            topics,
+            importance: row.importance,
+            source: row.source,
+            project: row.project,
+            embedding: null,
+            parent_id: row.id,
+            source_url: row.source_url,
+            fetched_at: row.fetched_at,
+            refresh_policy: row.refresh_policy as RefreshPolicy | null,
+            content_hash: row.content_hash,
+            origin: row.origin as Origin | null,
+          });
+          record(this.db.safeInsertEmbedding(mid, emb));
         }
       } else {
         const text = `${row.summary}\n${row.raw_text.slice(0, 500)}`;
         const emb = await this.embedder.embed(text);
-        try {
-          this.db.insertEmbedding(row.id, emb);
-          count++;
-        } catch {
-          // Same vec0 LEFT-JOIN quirk as the chunk path below.
-        }
+        record(this.db.safeInsertEmbedding(row.id, emb));
       }
     }
 
@@ -515,28 +539,23 @@ export class MemoryService {
     // vec_memories. Uses the same single-chunk embedding text
     // pattern as the parent path above.
     //
-    // Defensive insert handling: LEFT JOIN + hasEmbedding checks
-    // against the vec0 virtual table can miss existing rows, so
-    // INSERT may still hit UNIQUE violations on a PK that SELECT
-    // reports as absent. Catch per-row and continue so one stale
-    // entry does not crash the whole run.
+    // All vec_memories INSERTs flow through safeInsertEmbedding which
+    // classifies failures (pk_conflict, dim_mismatch, zero_length,
+    // nan_or_inf, other) and logs non-pk_conflict skips at warn, so
+    // the shape of failures in production is observable instead of
+    // swallowed by a bare catch.
     const chunkRows = this.db.chunksMissingEmbeddings();
     for (const row of chunkRows) {
       if (this.db.hasEmbedding(row.id)) continue;
       const text = `${row.summary}\n${row.raw_text.slice(0, 500)}`;
       const emb = await this.embedder.embed(text);
-      try {
-        this.db.insertEmbedding(row.id, emb);
-        count++;
-      } catch {
-        // Swallow any per-row insert error (most commonly UNIQUE
-        // violations against the vec0 virtual table where SELECT
-        // reports the row absent but INSERT sees it). Keep going
-        // so one stale entry does not crash the whole run.
-      }
+      record(this.db.safeInsertEmbedding(row.id, emb));
     }
 
-    return count;
+    const total =
+      embedded +
+      Object.values(skipped).reduce((sum, n) => sum + n, 0);
+    return { embedded, skipped, total };
   }
 }
 
