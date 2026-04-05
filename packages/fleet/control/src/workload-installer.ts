@@ -8,7 +8,14 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  existsSync,
+  rmSync,
+  readdirSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type {
   WorkloadManifest,
@@ -30,6 +37,10 @@ export interface InstallerOptions {
   /** Directory for workload stdout/stderr logs.
    *  Defaults to `~/Library/Logs`. */
   logDir?: string;
+  /** Number of prior install dirs (non-current) to retain after a
+   *  successful install, for rollback headroom. Defaults to 1.
+   *  Use 0 for aggressive GC, -1 to disable pruning entirely. */
+  keepPrior?: number;
 }
 
 export interface InstallResult {
@@ -108,6 +119,65 @@ export function verifyInstalledChecksums(
       );
     }
   }
+}
+
+/**
+ * Compare two semver strings numerically. Returns negative if a<b,
+ * positive if a>b, zero if equal. Unknown suffix characters after
+ * the major.minor.patch triple are compared lexically.
+ */
+export function compareSemver(a: string, b: string): number {
+  const parse = (s: string): number[] => {
+    const core = s.split(/[-+]/)[0];
+    return core.split(".").map((p) => Number(p) || 0);
+  };
+  const ap = parse(a);
+  const bp = parse(b);
+  const len = Math.max(ap.length, bp.length, 3);
+  for (let i = 0; i < len; i++) {
+    const diff = (ap[i] ?? 0) - (bp[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+/**
+ * Remove install dirs under `installRoot` matching the pattern
+ * `${workloadId}-*`, retaining the current version plus `keepPrior`
+ * most-recent non-current versions. Returns the list of removed dir
+ * names.
+ *
+ * Safe to call even when no prior installs exist. Passing keepPrior=-1
+ * disables pruning entirely. A non-existent installRoot is a no-op.
+ */
+export function pruneOldInstalls(
+  installRoot: string,
+  workloadId: string,
+  currentVersion: string,
+  keepPrior: number
+): string[] {
+  if (keepPrior < 0) return [];
+  if (!existsSync(installRoot)) return [];
+  const entries = readdirSync(installRoot, { withFileTypes: true });
+  const prefix = `${workloadId}-`;
+  const currentName = `${workloadId}-${currentVersion}`;
+
+  const prior = entries
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .filter((name) => name.startsWith(prefix) && name !== currentName)
+    .sort((a, b) => {
+      const va = a.slice(prefix.length);
+      const vb = b.slice(prefix.length);
+      // Descending: most-recent first.
+      return compareSemver(vb, va);
+    });
+
+  const toRemove = prior.slice(keepPrior);
+  for (const name of toRemove) {
+    rmSync(join(installRoot, name), { recursive: true, force: true });
+  }
+  return toRemove;
 }
 
 function homeDir(): string {
@@ -251,6 +321,22 @@ export async function installWorkload(
     last_probe_at: null,
     last_probe_tier: null,
   };
+
+  // 10. Prune older install dirs for this workload. Default keepPrior=1
+  //     leaves one rollback target. Runs only on the happy path so a
+  //     failed install never destroys working prior state.
+  const keepPrior = opts.keepPrior ?? 1;
+  const pruned = pruneOldInstalls(
+    installRoot,
+    manifest.id,
+    manifest.version,
+    keepPrior
+  );
+  if (pruned.length > 0) {
+    console.log(
+      `[installer] pruned ${pruned.length} prior install dir(s): ${pruned.join(", ")}`
+    );
+  }
 
   return { manifest, record, plistPath };
 }

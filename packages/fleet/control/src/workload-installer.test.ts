@@ -7,6 +7,8 @@ import {
   verifyInstalledChecksums,
   extractTarball,
   installWorkload,
+  pruneOldInstalls,
+  compareSemver,
 } from "./workload-installer";
 import type { WorkloadManifest, WorkloadDeclaration } from "./types";
 import type { SupervisorDriver } from "./supervisors/launchd";
@@ -280,5 +282,112 @@ describe("installWorkload (full flow with mock driver)", () => {
         logDir: join(tmp, "logs"),
       })
     ).rejects.toThrow(/unsupported artifact URL scheme/);
+  });
+});
+
+describe("compareSemver", () => {
+  test("orders patch versions numerically", () => {
+    expect(compareSemver("0.4.2", "0.4.10")).toBeLessThan(0);
+    expect(compareSemver("0.4.10", "0.4.2")).toBeGreaterThan(0);
+  });
+
+  test("orders minor and major versions", () => {
+    expect(compareSemver("0.5.0", "0.4.99")).toBeGreaterThan(0);
+    expect(compareSemver("1.0.0", "0.99.99")).toBeGreaterThan(0);
+  });
+
+  test("equal versions return 0", () => {
+    expect(compareSemver("1.2.3", "1.2.3")).toBe(0);
+  });
+
+  test("handles missing components as zero", () => {
+    expect(compareSemver("1", "1.0.0")).toBe(0);
+    expect(compareSemver("1.2", "1.2.0")).toBe(0);
+  });
+});
+
+describe("pruneOldInstalls", () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "seed-prune-"));
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const seed = (names: string[]): void => {
+    for (const n of names) {
+      mkdirSync(join(root, n), { recursive: true });
+      writeFileSync(join(root, n, "marker"), "x");
+    }
+  };
+
+  test("keeps current + N prior, removes the rest", () => {
+    seed([
+      "memory-0.1.0",
+      "memory-0.2.0",
+      "memory-0.4.2",
+      "memory-0.4.8",
+      "memory-0.4.9",
+    ]);
+    const removed = pruneOldInstalls(root, "memory", "0.4.9", 1);
+    expect(removed.sort()).toEqual(
+      ["memory-0.1.0", "memory-0.2.0", "memory-0.4.2"].sort()
+    );
+    expect(existsSync(join(root, "memory-0.4.9"))).toBe(true);
+    expect(existsSync(join(root, "memory-0.4.8"))).toBe(true);
+    expect(existsSync(join(root, "memory-0.4.2"))).toBe(false);
+  });
+
+  test("keepPrior=0 removes every non-current version", () => {
+    seed(["memory-0.4.8", "memory-0.4.9"]);
+    const removed = pruneOldInstalls(root, "memory", "0.4.9", 0);
+    expect(removed).toEqual(["memory-0.4.8"]);
+    expect(existsSync(join(root, "memory-0.4.8"))).toBe(false);
+  });
+
+  test("keepPrior=-1 disables pruning", () => {
+    seed(["memory-0.1.0", "memory-0.4.8", "memory-0.4.9"]);
+    const removed = pruneOldInstalls(root, "memory", "0.4.9", -1);
+    expect(removed).toEqual([]);
+    expect(existsSync(join(root, "memory-0.1.0"))).toBe(true);
+  });
+
+  test("ignores dirs from other workloads", () => {
+    seed(["memory-0.4.9", "memory-0.4.8", "fleet-router-1.0.0", "fleet-router-0.3.0"]);
+    const removed = pruneOldInstalls(root, "memory", "0.4.9", 0);
+    expect(removed).toEqual(["memory-0.4.8"]);
+    expect(existsSync(join(root, "fleet-router-1.0.0"))).toBe(true);
+    expect(existsSync(join(root, "fleet-router-0.3.0"))).toBe(true);
+  });
+
+  test("no-op when no prior versions exist", () => {
+    seed(["memory-0.4.9"]);
+    const removed = pruneOldInstalls(root, "memory", "0.4.9", 1);
+    expect(removed).toEqual([]);
+  });
+
+  test("no-op on non-existent installRoot", () => {
+    rmSync(root, { recursive: true, force: true });
+    const removed = pruneOldInstalls(root, "memory", "0.4.9", 1);
+    expect(removed).toEqual([]);
+  });
+
+  test("ignores regular files matching the pattern", () => {
+    seed(["memory-0.4.8"]);
+    writeFileSync(join(root, "memory-0.4.7-darwin-x64.tar.gz"), "tarball");
+    const removed = pruneOldInstalls(root, "memory", "0.4.9", 0);
+    expect(removed).toEqual(["memory-0.4.8"]);
+    expect(existsSync(join(root, "memory-0.4.7-darwin-x64.tar.gz"))).toBe(true);
+  });
+
+  test("sorts by semver not lexical (multi-digit safe)", () => {
+    seed(["memory-0.4.2", "memory-0.4.10", "memory-0.4.9"]);
+    // current=0.4.10, keepPrior=1 → keep 0.4.9, drop 0.4.2
+    const removed = pruneOldInstalls(root, "memory", "0.4.10", 1);
+    expect(removed).toEqual(["memory-0.4.2"]);
+    expect(existsSync(join(root, "memory-0.4.9"))).toBe(true);
   });
 });
