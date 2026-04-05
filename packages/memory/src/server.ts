@@ -41,6 +41,41 @@ export function createMemoryApp(deps: MemoryServerDeps): Hono {
     return c.json({ question: q, answer });
   });
 
+  // GET /search?q=&k=&project= — raw top-k vector search results
+  // Unlike /query, no LLM synthesis: returns scored memory chunks for
+  // callers that want to format their own context (e.g. prompt injection).
+  app.get("/search", async (c) => {
+    const q = (c.req.query("q") ?? "").trim();
+    if (!q) return c.json({ error: "missing ?q= parameter" }, 400);
+    const project = c.req.query("project") ?? "";
+    const kRaw = c.req.query("k");
+    let k = 5;
+    if (kRaw !== undefined) {
+      const parsed = Number(kRaw);
+      if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 50) {
+        return c.json({ error: "invalid 'k'; must be a positive integer <= 50" }, 400);
+      }
+      k = Math.floor(parsed);
+    }
+    const scored = await service.searchMemories(q, project, undefined, k);
+    const results = scored.map(({ score, distance, memory: m }) => ({
+      memory_id: m.id,
+      score,
+      distance,
+      similarity: 1.0 - distance,
+      summary: m.summary,
+      source: m.source,
+      project: m.project,
+      importance: m.importance,
+      entities: m.entities,
+      topics: m.topics,
+      created_at: m.created_at,
+      source_url: m.source_url,
+      origin: m.origin,
+    }));
+    return c.json({ query: q, k, count: results.length, results });
+  });
+
   // POST /ingest {text, source?, project?, source_url?, fetched_at?, refresh_policy?, content_hash?, origin?}
   app.post("/ingest", async (c) => {
     let data: any;

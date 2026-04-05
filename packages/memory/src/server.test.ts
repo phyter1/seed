@@ -298,6 +298,90 @@ describe("memory HTTP API", () => {
     expect(script.evaluate!.length).toBe(0);
   });
 
+  test("GET /search returns raw top-k results without LLM synthesis", async () => {
+    const { app } = makeApp({
+      ingest: { summary: "s", entities: ["alpha"], topics: ["t"], importance: 0.6 },
+    });
+    await app.request("/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "alpha document one", project: "p" }),
+    });
+    await app.request("/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "alpha document two", project: "p" }),
+    });
+    const res = await app.request("/search?q=alpha&k=5&project=p");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.query).toBe("alpha");
+    expect(body.k).toBe(5);
+    expect(Array.isArray(body.results)).toBe(true);
+    expect(body.count).toBe(body.results.length);
+    expect(body.results.length).toBeGreaterThan(0);
+    const first = body.results[0];
+    expect(typeof first.memory_id).toBe("number");
+    expect(typeof first.score).toBe("number");
+    expect(typeof first.distance).toBe("number");
+    expect(typeof first.similarity).toBe("number");
+    expect(typeof first.summary).toBe("string");
+    expect(Array.isArray(first.entities)).toBe(true);
+    expect(Array.isArray(first.topics)).toBe(true);
+  });
+
+  test("GET /search honors k parameter as upper bound", async () => {
+    const { app } = makeApp({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    for (let i = 0; i < 5; i++) {
+      await app.request("/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: `doc ${i}`, project: "p" }),
+      });
+    }
+    const res = await app.request("/search?q=doc&k=2&project=p");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.results.length).toBeLessThanOrEqual(2);
+  });
+
+  test("GET /search defaults k to 5 when omitted", async () => {
+    const { app } = makeApp({
+      ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
+    });
+    const res = await app.request("/search?q=hi");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.k).toBe(5);
+  });
+
+  test("GET /search returns 400 without q param", async () => {
+    const { app } = makeApp();
+    const res = await app.request("/search");
+    expect(res.status).toBe(400);
+  });
+
+  test("GET /search returns 400 on invalid k", async () => {
+    const { app } = makeApp();
+    const res = await app.request("/search?q=hi&k=0");
+    expect(res.status).toBe(400);
+    const res2 = await app.request("/search?q=hi&k=nope");
+    expect(res2.status).toBe(400);
+    const res3 = await app.request("/search?q=hi&k=100");
+    expect(res3.status).toBe(400);
+  });
+
+  test("GET /search returns empty results when no memories stored", async () => {
+    const { app } = makeApp();
+    const res = await app.request("/search?q=anything");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.count).toBe(0);
+    expect(body.results).toEqual([]);
+  });
+
   test("GET /memories lists stored memories", async () => {
     const { app } = makeApp({
       ingest: { summary: "s", entities: [], topics: [], importance: 0.5 },
