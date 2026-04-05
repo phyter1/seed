@@ -6,6 +6,8 @@
 // transport — callers supply `invoke` functions that wrap whichever
 // backend (local Ollama, MLX, cloud) they want to use.
 
+import type { ChallengeConfig, ChallengeResult, Sensitivity } from "./challenge";
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
@@ -53,6 +55,8 @@ export interface AggregatorContext {
   question: string;
   jurors: JurorResult[];
   maxTokens: number;
+  /** Challenge findings if the challenge round ran. Undefined if challenge disabled. */
+  challenge?: ChallengeResult;
 }
 
 /**
@@ -74,6 +78,12 @@ export interface JuryRequest {
   onJurorComplete?: (result: JurorResult) => void;
   /** Telemetry hook fired once after aggregation completes. */
   onAggregateComplete?: (info: { durationMs: number; status: "success" | "error"; error?: string }) => void;
+  /** Optional challenge round — after jurors return, a reviewer inspects their outputs. */
+  challenge?: ChallengeConfig;
+  /** Classification for the request. Used when challenge.sensitivityLock is true. */
+  sensitivity?: Sensitivity;
+  /** Telemetry hook fired after the challenge round completes. */
+  onChallengeComplete?: (result: ChallengeResult) => void;
 }
 
 export interface JuryResponse {
@@ -82,4 +92,6 @@ export interface JuryResponse {
   agreement: number;
   aggregateDurationMs: number;
   totalDurationMs: number;
+  /** Present when challenge round ran. */
+  challenge?: ChallengeResult;
 }
