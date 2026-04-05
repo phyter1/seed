@@ -103,10 +103,12 @@ seed self-update                      # update your own CLI binary
 
 Upgrades are serial by default. Each machine: `agent.update` command → agent downloads binary → verifies checksum → atomic rename → exits → launchd restarts it → reconnects with new version. The CLI polls `/v1/fleet/:id` every 3s until the new version shows up.
 
-The control plane itself is upgraded manually (it's not rolled by `fleet upgrade` because restarting it briefly disrupts fleet management):
+The control plane is not rolled by `fleet upgrade` (restarting it briefly disrupts fleet management). Use `upgrade-cp` for CP-only, or `release` for a coordinated full-tier roll:
 ```bash
-ssh ryanlowe@ren2.local '~/.local/bin/seed-control-plane self-update && launchctl kickstart -k gui/$UID/com.seed.control-plane'
+seed fleet upgrade-cp --machine ren2 --version v0.4.9   # CP only
+seed fleet release --version v0.4.9 --control-plane-machine ren2   # CP → agents → CLIs
 ```
+These are agent-mediated and auth-gated via `SEED_OPERATOR_TOKEN` — no SSH required. The CP host's agent downloads the new `seed-control-plane` binary, atomic-renames, then kickstarts the CP service via launchd.
 
 ### Declaring workloads
 
@@ -258,7 +260,7 @@ $EDITOR packages/fleet/control/package.json     # "version": "0.X.Y"
 # If memory service changed, also bump packages/memory/package.json
 
 # 2. Commit, push main:
-git add -A && git commit -m "chore: bump to vX.Y.Z" && git push origin main
+git add packages/fleet/control/src/version.ts packages/fleet/control/package.json && git commit -m "chore: bump to vX.Y.Z" && git push origin main
 
 # 3. Tag and push:
 git tag -a v0.X.Y -m "vX.Y.Z — <summary>" && git push origin v0.X.Y
@@ -266,11 +268,9 @@ git tag -a v0.X.Y -m "vX.Y.Z — <summary>" && git push origin v0.X.Y
 # 4. Watch CI:
 gh run watch $(gh run list --workflow=Release --limit 1 --json databaseId -q '.[0].databaseId')
 
-# 5. Roll the fleet:
-seed self-update                    # update local CLI
-seed fleet upgrade                  # roll all agents
-# manually update control plane:
-ssh ryanlowe@ren2.local '~/.local/bin/seed-control-plane self-update && launchctl kickstart -k gui/$UID/com.seed.control-plane'
+# 5. Roll the fleet (one command rolls CP + agents + CLIs):
+seed self-update                                          # update local CLI first
+seed fleet release --version v0.X.Y --control-plane-machine ren2
 ```
 
 Release CI (`.github/workflows/release.yml`) builds both `packages/fleet/control/` and `packages/memory/` binaries on macos-latest (darwin-arm64 + darwin-x64) and ubuntu-latest (linux-x64). Publishes tarballs + vec0 native extensions alongside.
