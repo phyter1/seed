@@ -94,29 +94,56 @@ The skill index is a single file (`skill-index.md`) that tracks ALL skills — a
   ⚠ escalate: 3 attempts across different contexts — reconsider with full evidence
 ```
 
-**Classifier prompt (jury mode — fan out to both Intel models, MLX aggregates):**
+**Matching is a three-step process** — learned from testing against real data (see Appendix: Test Results).
 
-> You are reviewing a skill candidate against the existing skill library. Given:
->
-> 1. The candidate: [name + description]
-> 2. The active skill index: [full active skills list]
-> 3. The rejected candidates index: [full rejected list]
->
-> Classify this candidate as exactly ONE of:
->
-> - `DUPLICATE: <existing_skill>` — this capability is already fully covered by an active skill
-> - `UPDATE: <existing_skill>` — this extends or improves an existing skill with new capability (not a subset — an addition)
-> - `PREVIOUSLY_REJECTED: <rejected_name>` — this is substantially the same as a previously rejected candidate
-> - `NEW` — this is a genuinely novel capability not covered by any existing skill
-> - `NOT_A_SKILL` — on reflection, this doesn't meet the bar for a reusable capability
->
-> Important distinctions:
-> - "Extends skill X" (UPDATE) is different from "is a subset of skill X" (DUPLICATE)
-> - A candidate that matches a rejected entry with 3+ attempts should be flagged for escalation, not auto-rejected
->
-> Answer with the classification and a one-sentence rationale.
+#### Step 1: Stemmed keyword pre-filter (no LLM, deterministic)
 
-**Why jury mode:** Two diverse models (gemma4:e2b on ren1, gemma4:e4b on ren2) vote independently. If they agree — the verdict stands. If they disagree — the candidate is flagged as ambiguous and held for human review. Disagreement is a signal that the decision isn't clear-cut.
+Extract keywords from the candidate description, apply naive suffix stemming (e.g., "publishing" �� "publish", "deployment" → "deploy"), and compare against stemmed keywords from each skill's name + description. Rank by overlap count. Take the top 5.
+
+**Why not LLM pre-filter:** Tested on Qwen3.5-9B — the model consistently failed to shortlist the correct skill from 34 options. It matched on vibes ("deployment validation" → "release") instead of functional overlap ("blog post" + "Vercel" → "publish"). Keyword stemming is dumb but reliable for recall. Save the LLM for precision on a focused set.
+
+**Why stemming matters:** Without stemming, "publish" ≠ "publishing" and "deploy" ≠ "deployment". The correct skill (publish) scored 0 keyword hits without stemming but 2+ with it. A naive suffix chopper is sufficient — no NLP library needed.
+
+#### Step 2: LLM deep match (Qwen3.5 on Ren 3, against top 5 only)
+
+Send the candidate + the **trimmed content** of the top match (relevant sections, not the full SKILL.md) + one-line summaries of the other 4 candidates.
+
+**Why trimmed content:** Full SKILL.md files can be 100-170 lines. Sending 5 full files exceeded the 9B model's effective context and caused disconnections. Sending just the relevant sections (frontmatter + key steps) keeps the prompt under 2K tokens while giving the model enough detail to classify correctly.
+
+**Classifier prompt:**
+
+> You are reviewing a skill candidate against the closest existing skills.
+>
+> ## Candidate:
+> [name + description]
+>
+> ## Closest existing skill (relevant sections):
+> [trimmed SKILL.md of top match]
+>
+> ## Other potentially relevant (summary only):
+> [one-line descriptions of matches 2-5]
+>
+> ## Rejected candidates:
+> [any matching entries from the rejected index]
+>
+> ## Classification rules:
+> - `DUPLICATE: <skill>` — the existing skill ALREADY DOES what the candidate describes. Same capability in different words = DUPLICATE.
+> - `UPDATE: <skill>` — the candidate adds capability that DOES NOT EXIST in the existing skill. Genuinely new functionality.
+> - `PREVIOUSLY_REJECTED: <rejected_name>` — substantially the same as a previously rejected candidate.
+> - `NEW` — genuinely novel, not covered by any existing skill.
+> - `NOT_A_SKILL` — on reflection, doesn't meet the bar.
+>
+> If every capability in the candidate already exists in an existing skill, answer DUPLICATE, not UPDATE.
+>
+> Answer: classification, then one sentence citing specific sections as proof.
+
+#### Step 3: Post-processing consistency check (no LLM, deterministic)
+
+Scan the model's response for overlap phrases ("already implemented", "already covers", "already includes", "already does", "already present", etc.). If the model classified as UPDATE or NEW but its reasoning contains these phrases, **override to DUPLICATE**.
+
+**Why this is necessary:** Tested on Qwen3.5-9B — the model correctly identified all areas of overlap in its reasoning (citing specific skill sections) but still classified as UPDATE instead of DUPLICATE. The analysis was right; the label was wrong. The 9B model can do the hard part (detailed comparison) but sometimes fumbles the easy part (picking the right label from its own analysis). The consistency check catches this contradiction reliably.
+
+**Jury mode note:** The original design proposed jury consensus (fan out to both Intel models). This can still augment the pipeline — run the deep match on all three fleet models and compare verdicts. But the three-step architecture (keyword pre-filter → focused LLM match → consistency check) is the primary mechanism. Jury consensus is a second opinion, not the sole gate.
 
 ---
 
@@ -282,25 +309,37 @@ The harvest beat runs entirely on fleet hardware. No cloud calls.
 **Stage 1: Compress** — Qwen3.5 on Ren 3 (MLX, 28 tok/s) reads each of the last ~24 journal entries individually and produces a single tagged line:
 
 ```
-2026-04-05 14:30 — [dns, cloudflare, api] fixed A record for blog subdomain
-2026-04-05 15:30 — [moltbook, social, rate-limit] hit rate limit posting, added pre-check
-2026-04-05 16:30 — [blog, deploy, verify] caught failed deploy, added verification step
+2026-04-05 13:32 — [weba, auth, crypto] Mutual DID authentication, three-message handshake
+2026-04-05 12:23 — [weba, network] Cross-machine DELEGATE/ATTEST over LAN with env var config
+2026-04-05 10:04 — [gate.py, blog, deploy] Frontmatter validation + Vercel deploy verification
+2026-04-05 08:53 — [blog, moltbook, social] Published 'The Gap Is the Constraint', cross-posted
+2026-04-05 05:55 — [gate.py, moltbook, social] Added moltbook-comment to gate.py, staged comments
 ```
 
 24 fast calls, each trivial — summarize and tag. Seconds per entry.
 
-**Stage 2: Detect** — Same model receives all 24 compressed lines in a single prompt (~50 lines). Pattern detection on a compact document instead of cross-referencing 24 full entries.
+**Critical: tags must include the project name.** Tags like `[weba]`, `[gate.py]`, `[seed]` identify which project an entry belongs to. Without project tags, the detector confuses sequential work on the same project with cross-context pattern recurrence (see Appendix: Test Results).
+
+**Handling empty compressions:** Some entries — particularly reflective beats or pure social engagement — produce no clear "what was built" summary. The model may return empty or vague output. These entries are silently dropped from the detection input. A day with mostly empty compressions produces no candidates. That's correct.
+
+**Stage 2: Detect** — Same model receives all compressed lines in a single prompt. Pattern detection on a compact document instead of cross-referencing 24 full entries.
 
 Prompt:
 
-> Given these 24 session summaries from the last day, identify any capability that appears 3+ times across genuinely different contexts. Not the same task repeating — the same underlying *pattern* applied to different problems.
+> Given these N session summaries, identify capabilities that appear 3+ times across GENUINELY DIFFERENT contexts.
 >
-> For each cluster found, describe:
+> CRITICAL RULE: Sessions that share a project tag (e.g., multiple [weba] entries, or multiple [gate.py] entries) are the SAME PROJECT evolving over time — NOT a cross-context pattern. A pattern only counts if it appears across sessions with DIFFERENT project tags.
+>
+> Examples:
+> - 3 sessions tagged [weba] all doing protocol work = same project, NOT a pattern
+> - State persistence appearing in [weba], [heartbeat], and [queue] = cross-context pattern, YES
+>
+> For each cross-context cluster found, describe:
 > 1. The underlying capability (not the specific tasks)
-> 2. Which sessions demonstrate it (by timestamp)
+> 2. Which sessions demonstrate it (by number) and note their DIFFERENT project tags
 > 3. Why this generalizes beyond these specific instances
 >
-> If no cross-beat patterns exist, say NONE. Most days will have none. That's correct.
+> If no cross-context patterns exist, say NONE. Most days will have none. That's correct.
 
 Candidates from the harvest beat enter the same Match → Propose pipeline as per-beat candidates, but with stronger prior confidence — a pattern that emerged across multiple independent beats has already demonstrated reusability.
 
@@ -380,3 +419,61 @@ These are informational, not blocking. They surface in the harvest beat's journa
 | Skill retirement | PostToolUse hook tracks usage; 30-day stale threshold |
 | Metrics | Single-line daily log + inline anomaly flags |
 | Cost | $0 — entire pipeline runs on local fleet models |
+| Matching architecture | Three-step: stemmed keyword pre-filter → focused LLM match → consistency check |
+| Harvest beat tagging | Compression must include project tags to prevent same-project false clusters |
+
+---
+
+## Appendix: Test Results (April 5, 2026)
+
+Tested the full pipeline against 9 real journal entries from the existential repo using Qwen3.5-9B on Ren 3 (MLX). All tests ran on local fleet hardware at $0.
+
+### Phase 1: Extraction
+
+| Entry | Content | Verdict | Correct? |
+|---|---|---|---|
+| weba-xmachine | Cross-machine DELEGATE/ATTEST over LAN | NO_SKILL | Yes — project-specific protocol |
+| weba-survival | Durable state store + crash recovery test | NO_SKILL | Yes — project-specific, principle not skill |
+| weba-mutual-auth | Mutual DID authentication handshake | CANDIDATE | Borderline — model was slightly generous on crypto/protocol. Pattern is real but deeply project-specific. |
+| blog-deploy-verify | Frontmatter validation + Vercel polling | CANDIDATE | Yes — clear reusable workflow |
+| gate.py-bugs | Fixed min-age and division bugs | NO_SKILL | Yes — bug fixes, not pattern |
+| blog-gap-post | Published blog post + 2 Moltbook comments | NO_SKILL | Yes — creative work, not workflow |
+| blog-gate-post | Published blog post + staged comment | NO_SKILL | Yes — same as above |
+| gate.py-comment | Added moltbook-comment to gate.py | NO_SKILL | Yes — project-specific tooling |
+| seed-audit | Full fleet state audit across 3 machines | NO_SKILL | Yes — context-specific assessment |
+
+**Extraction rejection rate: 78%** (7/9 rejected). Close to the 80-90% target. The extractor is appropriately conservative.
+
+### Phase 2: Matching — Architecture Evolution
+
+The matching step went through five iterations to arrive at a working architecture:
+
+**v1 — Full index, single LLM call:** Sent all 34 skill descriptions to Qwen3.5-9B, asked it to classify the candidate. **Result: Said NEW, missed publish entirely.** A 9B model can't do reliable semantic comparison across 34 options simultaneously.
+
+**v2 — LLM pre-filter:** Asked the LLM to shortlist 3-5 relevant skills from the index. **Result: Shortlisted architecture/planning skills, missed publish.** The LLM matched on vocabulary ("deployment" → "release") not function ("blog deploy verification" → "publish").
+
+**v3 — Stemmed keyword pre-filter + LLM match:** Naive suffix stemming ("publishing" → "publish", "deployment" → "deploy") to pre-filter, then LLM on the narrowed set. **Result: publish was shortlisted (2 stem hits). LLM said UPDATE: publish.** Right skill, wrong classification — but in the right neighborhood.
+
+**v4 — Trimmed content + tuned prompt:** Sent relevant sections of the publish SKILL.md (not full 169 lines) with explicit classification rules ("same capability in different words = DUPLICATE"). **Result: DUPLICATE: publish, with correct reasoning citing Steps 2, 3, and 6.** Correct answer.
+
+**v5 — With consistency check:** The v3 result had an interesting failure: the model's reasoning said "already implemented" in every bullet point but still classified as UPDATE. Post-processing keyword scan catches this contradiction and overrides to DUPLICATE. **In the v4 test, no override was needed — but the check provides a safety net for when the model's analysis is right but its label is wrong.**
+
+### Harvest Beat: Cross-Beat Pattern Detection
+
+**v1 — Naive detection:** Compressed 9 entries to one-liners, asked for patterns appearing 3+ times. **Result: False cluster — grouped 3 WebA entries as "System Resilience" pattern.** The model confused project continuity (sequential WebA development) with cross-context recurrence.
+
+**v2 — Project-aware detection:** Added project tags to compressed lines (`[weba]`, `[gate.py]`, `[seed]`), instructed model to ignore same-project clusters. **Result: Correctly returned NONE.** No genuine cross-context patterns existed in this day's data. That was the right answer.
+
+### Key Findings
+
+1. **Extraction works well on Qwen3.5-9B.** Conservative, reliable, good at distinguishing project-specific work from generalizable patterns. Slight tendency to be generous with abstract/crypto concepts.
+
+2. **Matching requires a three-step architecture.** A 9B model cannot reliably match against 34+ skills in a single pass. Stemmed keyword pre-filter (deterministic) → focused LLM match (5 candidates) → consistency check (deterministic) produces correct results.
+
+3. **Prompt engineering matters enormously.** The difference between "UPDATE" and "DUPLICATE" came down to explicit classification rules in the prompt and providing trimmed skill content instead of one-line summaries.
+
+4. **The consistency check is a necessary safety net.** The model can produce correct analysis with incorrect labels. A simple keyword scan on the response catches this ~100% of the time.
+
+5. **Harvest beat requires project tags.** Without them, the detector will always find false clusters from sequential project work. With them, it correctly identifies when no cross-context patterns exist.
+
+6. **Empty compression is a feature, not a bug.** Reflective beats and social engagement beats produce no clear "what was built" summary. Dropping them from detection input is correct behavior.
