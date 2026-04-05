@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd template for workload-managed fleet-router.
+
+  Rendered by the seed agent's workload installer. The installer
+  substitutes:
+    @@LABEL@@        - launchd label
+    @@BINARY@@       - absolute path to the binary inside install_dir
+    @@INSTALL_DIR@@  - the workload's install directory
+    @@HOME@@         - installing user's $HOME
+    @@LOG_PATH@@     - stderr/stdout log path
+    @@ENV@@          - pre-rendered <key>/<string> pairs for env
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>@@LABEL@@</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@@BINARY@@</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>@@INSTALL_DIR@@</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+@@ENV@@
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>@@LOG_PATH@@</string>
+
+  <key>StandardErrorPath</key>
+  <string>@@LOG_PATH@@</string>
+</dict>
+</plist>
