@@ -406,6 +406,40 @@ export class MemoryDB {
     return row?.id ?? null;
   }
 
+  /**
+   * Backfill origin on existing rows where it is NULL. Idempotent —
+   * only touches rows with `origin IS NULL`, so repeated runs are
+   * no-ops after the first. Optionally sets `source` to a default
+   * value for rows where source is empty or NULL (leaves rows with
+   * an explicit source alone).
+   *
+   * Used to one-shot migrate memories written before memory@0.4.0
+   * (which added the origin column) to a known origin value — for
+   * the ren1 deployment this is {origin: 'internal', default_source:
+   * 'journal'} per the extraction plan.
+   */
+  backfillOrigin(params: {
+    origin: Origin;
+    default_source?: string;
+  }): { updated: number } {
+    const { origin, default_source } = params;
+    if (default_source !== undefined) {
+      const result = this.db
+        .prepare(
+          `UPDATE memories
+           SET origin = ?,
+               source = CASE WHEN source IS NULL OR source = '' THEN ? ELSE source END
+           WHERE origin IS NULL`
+        )
+        .run(origin, default_source);
+      return { updated: Number(result.changes) };
+    }
+    const result = this.db
+      .prepare(`UPDATE memories SET origin = ? WHERE origin IS NULL`)
+      .run(origin);
+    return { updated: Number(result.changes) };
+  }
+
   checkDuplicate(
     embedding: number[],
     threshold: number

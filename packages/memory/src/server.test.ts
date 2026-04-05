@@ -418,4 +418,83 @@ describe("memory HTTP API", () => {
     expect(body.status).toBe("done");
     expect(typeof body.backfilled).toBe("number");
   });
+
+  test("POST /backfill-origin updates null-origin rows", async () => {
+    const { app, db } = makeApp();
+    // Write legacy rows directly (no origin)
+    db.storeMemory({
+      raw_text: "x",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+    });
+    db.storeMemory({
+      raw_text: "y",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+    });
+    const res = await app.request("/backfill-origin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ origin: "internal" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.status).toBe("done");
+    expect(body.updated).toBe(2);
+  });
+
+  test("POST /backfill-origin 400 on missing origin", async () => {
+    const { app } = makeApp();
+    const res = await app.request("/backfill-origin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as any;
+    expect(body.error).toContain("origin");
+  });
+
+  test("POST /backfill-origin 400 on invalid origin value", async () => {
+    const { app } = makeApp();
+    const res = await app.request("/backfill-origin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ origin: "third-party" }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("POST /backfill-origin with default_source fills empty source", async () => {
+    const { app, db } = makeApp();
+    const id = db.storeMemory({
+      raw_text: "x",
+      summary: "s",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      source: "",
+    });
+    const res = await app.request("/backfill-origin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ origin: "internal", default_source: "journal" }),
+    });
+    expect(res.status).toBe(200);
+    expect(db.getMemory(id)!.source).toBe("journal");
+  });
+
+  test("POST /backfill-origin 400 on invalid JSON", async () => {
+    const { app } = makeApp();
+    const res = await app.request("/backfill-origin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "not json",
+    });
+    expect(res.status).toBe(400);
+  });
 });
