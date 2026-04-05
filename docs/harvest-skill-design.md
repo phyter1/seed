@@ -253,10 +253,66 @@ Every Seed installation runs its own fleet, its own heartbeats, its own work. Wi
 
 ---
 
+## Resolved Decisions
+
+1. **Index location:** Root-level `skill-index.md`. It's a first-class system artifact, not documentation about the system. Same level as `self.md` and `projects.md`.
+2. **Diff format for updates:** Markdown description with before/after excerpts. Precise enough to act on, readable enough to evaluate quickly. The actual edit is done by whoever approves the proposal — not pre-computed as a patch.
+3. **Cross-beat pattern detection:** Included as a dedicated harvest beat tier (see below).
+
+---
+
+## Harvest Beat — Cross-Beat Pattern Detection
+
+The heartbeat becomes three tiers:
+
+| Tier | Model | Cadence | Purpose |
+|------|-------|---------|---------|
+| Quick | Haiku/fast | Every 10 min | Maintenance, inbox check |
+| Deep | Opus/strong | Every ~hour | Substantive work + per-beat extraction |
+| Harvest | Local fleet only | Daily | Batch-review recent deep beats for cross-beat skill patterns |
+
+The harvest beat asks a fundamentally different question than per-beat extraction. Per-beat: "Did *this* beat produce a skill?" Harvest beat: "Do the *last N beats together* reveal a pattern that no individual beat surfaced?"
+
+**Why this matters:** Some skills only become visible in aggregate. If you solved a similar DNS problem three times this week in three different contexts, no single beat screams "skill!" but the cluster does. Repetition across different contexts is exactly what "reusable" means.
+
+### Two-Stage Local Processing ($0)
+
+The harvest beat runs entirely on fleet hardware. No cloud calls.
+
+**Stage 1: Compress** — Qwen3.5 on Ren 3 (MLX, 28 tok/s) reads each of the last ~24 journal entries individually and produces a single tagged line:
+
+```
+2026-04-05 14:30 — [dns, cloudflare, api] fixed A record for blog subdomain
+2026-04-05 15:30 — [moltbook, social, rate-limit] hit rate limit posting, added pre-check
+2026-04-05 16:30 — [blog, deploy, verify] caught failed deploy, added verification step
+```
+
+24 fast calls, each trivial — summarize and tag. Seconds per entry.
+
+**Stage 2: Detect** — Same model receives all 24 compressed lines in a single prompt (~50 lines). Pattern detection on a compact document instead of cross-referencing 24 full entries.
+
+Prompt:
+
+> Given these 24 session summaries from the last day, identify any capability that appears 3+ times across genuinely different contexts. Not the same task repeating — the same underlying *pattern* applied to different problems.
+>
+> For each cluster found, describe:
+> 1. The underlying capability (not the specific tasks)
+> 2. Which sessions demonstrate it (by timestamp)
+> 3. Why this generalizes beyond these specific instances
+>
+> If no cross-beat patterns exist, say NONE. Most days will have none. That's correct.
+
+Candidates from the harvest beat enter the same Match → Propose pipeline as per-beat candidates, but with stronger prior confidence — a pattern that emerged across multiple independent beats has already demonstrated reusability.
+
+### Cost
+
+- Stage 1: ~24 local model calls × ~50 tokens each = ~1,200 tokens total
+- Stage 2: 1 local model call × ~500 tokens = ~500 tokens
+- Total: ~1,700 tokens on local fleet. $0. Under 5 minutes wall time.
+
+---
+
 ## Open Questions
 
-1. **Index location.** Root-level `skill-index.md` vs `docs/skill-index.md` vs inside `.claude/`? Needs to be easy for the harvest pipeline to find and for humans to review.
-2. **Diff format for updates.** Markdown-based human-readable diff, or literal unified diff? Markdown is easier to review; unified diff is easier to apply.
-3. **Cross-beat pattern detection.** This design extracts per-beat. A future enhancement could batch-review the last N beats for patterns that only emerge across multiple sessions. Deferred — per-beat is simpler and sufficient to start.
-4. **Skill retirement.** Skills can become obsolete. Should the harvest pipeline also flag skills that haven't been invoked in N beats for potential deprecation?
-5. **Metrics.** Track extraction rate, jury agreement rate, proposal acceptance rate, and library growth over time. Useful for tuning thresholds.
+1. **Skill retirement.** Skills can become obsolete. Should the harvest pipeline also flag skills that haven't been invoked in N beats for potential deprecation?
+2. **Metrics.** Track extraction rate, jury agreement rate, proposal acceptance rate, and library growth over time. Useful for tuning thresholds.
