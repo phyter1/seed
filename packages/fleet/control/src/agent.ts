@@ -529,21 +529,13 @@ type CommandHandler = (
 ) => Promise<{ success: boolean; output: string }>;
 
 /**
- * Locate the seed-cli binary on this machine, if installed.
- *
- * Checks canonical install paths. Returns the first executable match or
- * null. We don't shell out to `which` because PATH in the agent's
- * launchd context is narrow and unreliable for operator binaries.
+ * Locate a seed binary on this machine, trying a list of canonical
+ * paths. Returns the first executable match or null. We don't shell
+ * out to `which` because PATH in the agent's launchd context is narrow
+ * and unreliable for operator binaries.
  */
-export function findCliPath(): string | null {
+function findBinaryInCandidates(candidates: string[]): string | null {
   const fs = require("fs");
-  const home = process.env.HOME ?? "";
-  const candidates = [
-    `${home}/.local/bin/seed`,
-    `${home}/.local/bin/seed-cli`,
-    "/usr/local/bin/seed",
-    "/opt/homebrew/bin/seed",
-  ];
   for (const p of candidates) {
     try {
       fs.accessSync(p, fs.constants.X_OK);
@@ -553,13 +545,36 @@ export function findCliPath(): string | null {
   return null;
 }
 
+/** Locate the seed-cli binary on this machine, if installed. */
+export function findCliPath(): string | null {
+  const home = process.env.HOME ?? "";
+  return findBinaryInCandidates([
+    `${home}/.local/bin/seed`,
+    `${home}/.local/bin/seed-cli`,
+    "/usr/local/bin/seed",
+    "/opt/homebrew/bin/seed",
+  ]);
+}
+
+/** Locate the seed-control-plane binary on this machine, if installed. */
+export function findControlPlanePath(): string | null {
+  const home = process.env.HOME ?? "";
+  return findBinaryInCandidates([
+    `${home}/.local/bin/seed-control-plane`,
+    "/usr/local/bin/seed-control-plane",
+    "/opt/homebrew/bin/seed-control-plane",
+  ]);
+}
+
 /**
- * Read the version of a seed-cli binary by execing it with `version`.
+ * Read the semver from a seed binary by execing it with `version`.
  * Returns null if the invocation fails or output is unparseable.
+ * Works for any seed binary (cli, agent, control-plane) since all
+ * three accept `version`.
  */
-export function getCliVersion(cliPath: string): string | null {
+export function getCliVersion(binaryPath: string): string | null {
   try {
-    const proc = Bun.spawnSync([cliPath, "version"]);
+    const proc = Bun.spawnSync([binaryPath, "version"]);
     if (proc.exitCode !== 0) return null;
     const out = new TextDecoder().decode(proc.stdout).trim();
     const match = out.match(/\d+\.\d+\.\d+/);
@@ -650,6 +665,61 @@ function createCommandHandlers(): Map<string, CommandHandler> {
       return {
         success: false,
         output: `cli self-update failed: ${err?.message ?? err}`,
+      };
+    }
+  });
+
+  handlers.set("control-plane.update", async (params) => {
+    const cpPath = findControlPlanePath();
+    if (!cpPath) {
+      return {
+        success: false,
+        output: "no seed-control-plane binary found on this machine",
+      };
+    }
+    const label =
+      typeof params.supervisor_label === "string"
+        ? params.supervisor_label
+        : "com.seed.control-plane";
+    const currentVersion = getCliVersion(cpPath) ?? "unknown";
+    const version =
+      typeof params.version === "string" ? params.version : undefined;
+    const force = params.force === true;
+    try {
+      const result = await runSelfUpdate({
+        binary: "seed-control-plane",
+        version,
+        currentVersion,
+        force,
+        destPath: cpPath,
+      });
+      if (!result.updated) {
+        return {
+          success: true,
+          output: `seed-control-plane already at ${result.toVersion}, no-op`,
+        };
+      }
+      // Restart the control plane via launchd kickstart after a short
+      // delay so this command_result reaches the control plane before
+      // its WebSocket drops. The agent itself stays alive; it'll
+      // reconnect once the CP is back up.
+      const uid = process.getuid?.() ?? 0;
+      setTimeout(() => {
+        Bun.spawn([
+          "launchctl",
+          "kickstart",
+          "-k",
+          `gui/${uid}/${label}`,
+        ]).exited.catch(() => {});
+      }, 1000);
+      return {
+        success: true,
+        output: `seed-control-plane updated ${result.fromVersion} -> ${result.toVersion}, restarting ${label}`,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        output: `control-plane self-update failed: ${err?.message ?? err}`,
       };
     }
   });

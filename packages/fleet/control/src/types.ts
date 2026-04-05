@@ -408,6 +408,7 @@ export const ACTION_WHITELIST = [
   "agent.update",
   "agent.restart",
   "cli.update",
+  "control-plane.update",
   "workload.install",
   "workload.reload",
   "workload.remove",

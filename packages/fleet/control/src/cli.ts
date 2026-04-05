@@ -891,6 +891,92 @@ async function cmdUpgrade(args: string[]) {
   if (failed.length > 0) process.exit(1);
 }
 
+// --- Control-plane update ---
+
+async function cmdUpgradeControlPlane(args: string[]) {
+  let machineId: string | undefined;
+  let version: string | undefined;
+  let force = false;
+  let label: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--machine" && args[i + 1]) machineId = args[++i];
+    else if (a === "--version" && args[i + 1]) version = args[++i];
+    else if (a === "--label" && args[i + 1]) label = args[++i];
+    else if (a === "--force") force = true;
+    else {
+      console.error(`Unknown argument: ${a}`);
+      console.error(
+        "Usage: seed fleet upgrade-cp --machine <id> [--version <tag>] [--label <launchd-label>] [--force]"
+      );
+      process.exit(1);
+    }
+  }
+
+  if (!machineId) {
+    console.error("--machine <id> is required");
+    console.error(
+      "Usage: seed fleet upgrade-cp --machine <id> [--version <tag>] [--label <launchd-label>] [--force]"
+    );
+    process.exit(1);
+  }
+
+  // Resolve the release tag if version was specified.
+  let tag: string;
+  if (version) {
+    const release = await fetchRelease(version);
+    tag = release.tag;
+    console.log(`Target: ${release.tag} (${release.version})`);
+  } else {
+    const release = await fetchRelease("latest");
+    tag = release.tag;
+    console.log(`Target: ${release.tag} (${release.version}) [latest]`);
+  }
+
+  process.stdout.write(`  ${machineId}: dispatching control-plane.update ${tag}... `);
+  const params: Record<string, unknown> = { version: tag };
+  if (force) params.force = true;
+  if (label) params.supervisor_label = label;
+
+  let dispatch: { command_id?: string };
+  try {
+    dispatch = (await apiPost(`/v1/fleet/${machineId}/command`, {
+      action: "control-plane.update",
+      params,
+      timeout_ms: 60_000,
+    })) as { command_id?: string };
+  } catch (err: any) {
+    console.log(`FAIL (${err?.message ?? err})`);
+    process.exit(1);
+  }
+
+  const commandId = dispatch.command_id;
+  if (!commandId) {
+    console.log("dispatched (no command_id; control plane will restart shortly)");
+    return;
+  }
+
+  // Longer timeout than cli.update because the agent's WebSocket has
+  // to reconnect after the control plane restarts before the result
+  // can be delivered and logged to the audit table.
+  console.log("dispatched. waiting for result (control plane will restart)...");
+  const result = await waitForCommandResult(machineId, commandId, 45_000);
+  if (!result) {
+    console.log(
+      "  result pending — the control plane restart may still be in progress."
+    );
+    console.log("  Re-check with: seed fleet audit --limit 10");
+    return;
+  }
+  if (result.success) {
+    console.log(`  ✓ ${result.output ?? "ok"}`);
+  } else {
+    console.log(`  ✗ ${result.output ?? "failed"}`);
+    process.exit(1);
+  }
+}
+
 // --- Self-update (for the CLI binary itself) ---
 
 async function cmdSelfUpdate(args: string[]) {
@@ -1007,6 +1093,11 @@ async function main() {
       await cmdUpgrade(args.slice(1));
       break;
 
+    case "upgrade-cp":
+    case "upgrade-control-plane":
+      await cmdUpgradeControlPlane(args.slice(1));
+      break;
+
     case "self-update":
       await cmdSelfUpdate(args.slice(1));
       break;
@@ -1047,6 +1138,10 @@ async function main() {
         "  upgrade [--version <tag>] [--machine <id>] [--dry-run] [--parallel N]"
       );
       console.log("                      Roll out a new agent version across the fleet");
+      console.log(
+        "  upgrade-cp --machine <id> [--version <tag>] [--label <label>] [--force]"
+      );
+      console.log("                      Update the control plane binary on the host running it");
       console.log("  self-update [--version <tag>] [--force]");
       console.log("                      Update the seed CLI binary in place");
       console.log("  version             Print CLI version");
