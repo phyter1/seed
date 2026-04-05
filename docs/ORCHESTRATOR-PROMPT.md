@@ -64,8 +64,8 @@ The fleet router handles every local inference request. It should emit OTLP-comp
        provider: "mlx" | "ollama",
        route_type: "keyword" | "explicit" | "jury",
        route_pattern: string,   // which pattern matched (code, reasoning, etc.)
-       tokens_prompt: number,
-       tokens_completion: number,
+       tokens_input: number,
+       tokens_output: number,
        duration_ms: number,
        status: "success" | "error",
        thinking_mode: boolean,

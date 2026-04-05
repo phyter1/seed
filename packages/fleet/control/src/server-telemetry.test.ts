@@ -158,8 +158,8 @@ describe("POST /otlp/v1/logs", () => {
                 {
                   body: { stringValue: "inference_request" },
                   attributes: [
-                    { key: "tokens_prompt", value: { intValue: "100" } },
-                    { key: "tokens_completion", value: { intValue: "50" } },
+                    { key: "tokens_input", value: { intValue: "100" } },
+                    { key: "tokens_output", value: { intValue: "50" } },
                     { key: "model", value: { stringValue: "qwen3-coder" } },
                   ],
                 },

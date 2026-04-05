@@ -248,8 +248,8 @@ export function normalizeLogRecord(
   let tokenCount = 0;
   let costCents = 0;
   if (eventType === "inference_request") {
-    const prompt = getIntAttr(record.attributes, "tokens_prompt") ?? 0;
-    const completion = getIntAttr(record.attributes, "tokens_completion") ?? 0;
+    const prompt = getIntAttr(record.attributes, "tokens_input") ?? 0;
+    const completion = getIntAttr(record.attributes, "tokens_output") ?? 0;
     tokenCount = prompt + completion;
     costCents = getIntAttr(record.attributes, "cost_cents") ?? 0;
   }
