@@ -68,8 +68,13 @@ const PII_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
     pattern: /\(\d{3}\)\s*\d{3}[-.\s]\d{4}|\b\d{3}[-.]\d{3}[-.]\d{4}\b/,
   },
   {
+    // HTML5 spec email regex (WHATWG / W3C), adapted for substring search
+    // by removing the ^ / $ anchors. This is the same regex browsers use
+    // to validate <input type="email">.
+    // https://html.spec.whatwg.org/multipage/input.html#valid-e-mail-address
     name: "email_address",
-    pattern: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/,
+    pattern:
+      /[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*/,
   },
 ];
 
