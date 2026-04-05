@@ -66,6 +66,24 @@ jobs:
           echo "sqlite-vec native extensions ready:"
           ls node_modules/sqlite-vec-*/vec0.*
 
+      - name: Stamp version
+        # Overwrite SEED_VERSION in version.ts with the tag name (minus the
+        # leading `v`) so the compiled binaries report the release version
+        # they were built from. Without this step every published binary
+        # reports whatever literal is checked into main, which has proven
+        # easy to forget to bump (resulting in `seed fleet release` always
+        # timing out because its success predicate compares agent_version
+        # against the target tag).
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          FILE="packages/fleet/control/src/version.ts"
+          echo "stamping $FILE with version $VERSION"
+          # Portable in-place sed: write to tmp then move (works on macOS + Linux).
+          sed -E "s/export const SEED_VERSION = \"[^\"]+\";/export const SEED_VERSION = \"$VERSION\";/" "$FILE" > "$FILE.tmp"
+          mv "$FILE.tmp" "$FILE"
+          grep "SEED_VERSION" "$FILE"
+
       - name: Build fleet-control binaries
         working-directory: packages/fleet/control
         run: bash scripts/build-binaries.sh
