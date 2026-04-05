@@ -1,0 +1,46 @@
+name: Test
+
+# PR gate: typecheck + test every package with a test suite.
+#
+# Runs on pull_request against main and on push to main. Each package
+# in the matrix installs its own deps, typechecks, then runs bun test.
+# Mirrors the dev loop documented in CLAUDE.md:
+#   bun install && bunx tsc --noEmit && bun test
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - packages/fleet/control
+          - packages/memory
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.package }}
+        run: bun install
+
+      - name: Typecheck
+        working-directory: ${{ matrix.package }}
+        run: bunx tsc --noEmit
+
+      - name: Test
+        working-directory: ${{ matrix.package }}
+        run: bun test
