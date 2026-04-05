@@ -34,7 +34,7 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Install transitive file: dependencies (router)
+      - name: "Install transitive file: dependencies (router)"
         if: matrix.package == 'packages/inference/router'
         run: |
           bun install --cwd packages/inference/utils
