@@ -298,11 +298,15 @@ export class MemoryService {
   async searchMemories(
     queryText: string,
     project: string = "",
-    excludeIds?: Set<number>
+    excludeIds?: Set<number>,
+    limit: number = 10
   ): Promise<ScoredMemory[]> {
     if (!this.db.hasVec) return [];
     const embedding = await this.embedder.embed(queryText);
-    const results = this.db.knnSearch(embedding, 10);
+    // Overfetch so project/exclude filtering doesn't starve results below
+    // the requested limit. The KNN call is the only cost here.
+    const fetchK = Math.max(limit * 3, 10);
+    const results = this.db.knnSearch(embedding, fetchK);
     if (results.length === 0) return [];
 
     const distances = new Map<number, number>(results.map((r) => [r.memory_id, r.distance]));
@@ -326,7 +330,7 @@ export class MemoryService {
       scored.push({ score, distance: dist, memory: m });
     }
     scored.sort((a, b) => b.score - a.score);
-    return scored;
+    return scored.slice(0, limit);
   }
 
   buildContext(scored: ScoredMemory[], project: string, extraEntities: string[] = []): string {
