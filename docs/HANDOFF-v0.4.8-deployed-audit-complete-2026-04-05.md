@@ -258,7 +258,7 @@ Both packages ran clean on darwin-arm64 (ren3): typecheck clean, 281/0 and 104/0
 
 ## Follow-up: issue #38 closed (PR #41)
 
-**PR:** phyter1/seed#41 — `fix(router): wait for port release before MLX respawn (#38)` — OPEN, CI green
+**PR:** phyter1/seed#41 — `fix(router): wait for port release before MLX respawn (#38)` — MERGED as `871d05a`
 **CI run:** https://github.com/phyter1/seed/actions/runs/24007435596 — ✅ green (fleet/control 281/0, memory 104/0)
 **Deployed:** fleet-router@1.1.1 on ren3, via SCP'd tarball + `PUT /v1/workloads/ren3` (bumping version 1.1.0 → 1.1.1 + new `artifact_url`) + `seed fleet workload install fleet-router --machine ren3`.
 
