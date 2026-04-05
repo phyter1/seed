@@ -35,6 +35,24 @@ import { ACTION_WHITELIST, DEFAULT_PROXY_CONFIG } from "./types";
 import { createProxy, type ProxyHandle, type WsSender } from "./proxy";
 import { SEED_VERSION } from "./version";
 import { runSelfUpdate } from "./self-update";
+import { WorkloadDB } from "./workload-db";
+import { createLaunchdDriver } from "./supervisors/launchd";
+import {
+  reconcile as reconcileWorkloads,
+  type ReconcileSummary,
+} from "./workload-runner";
+import type { WorkloadDeclaration } from "./types";
+
+function summarizeReconcile(s: ReconcileSummary): string {
+  const parts: string[] = [];
+  if (s.installed.length) parts.push(`installed=${s.installed.join(",")}`);
+  if (s.upgraded.length) parts.push(`upgraded=${s.upgraded.join(",")}`);
+  if (s.reloaded.length) parts.push(`reloaded=${s.reloaded.join(",")}`);
+  if (s.failed.length)
+    parts.push(`failed=${s.failed.map((f) => f.workload_id).join(",")}`);
+  if (s.skipped.length) parts.push(`skipped=${s.skipped.join(",")}`);
+  return parts.length ? parts.join(" ") : "no changes";
+}
 
 const AGENT_VERSION = SEED_VERSION;
 const HEALTH_INTERVAL_MS = 30_000;
@@ -623,6 +641,103 @@ async function runAgent() {
   const memoryGb = await getMemoryGB();
   const commandHandlers = createCommandHandlers();
 
+  // --- Workload Infrastructure ---
+  // Only wire up workloads on macOS for Phase 1 (launchd-only driver).
+  // Linux agents keep working; they just can't install workloads yet.
+  const workloadsEnabled = process.platform === "darwin";
+  const workloadDbPath = `${process.env.HOME}/.local/share/seed/workloads.db`;
+  const workloadDb = workloadsEnabled ? new WorkloadDB(workloadDbPath) : null;
+  const supervisorDriver = workloadsEnabled ? createLaunchdDriver() : null;
+
+  async function runWorkloadReconcile(
+    source: string
+  ): Promise<{ summary: ReturnType<typeof summarizeReconcile>; raw: any } | null> {
+    if (!workloadDb || !supervisorDriver) return null;
+    const declared = (cachedConfig?.workloads ?? []) as WorkloadDeclaration[];
+    const raw = await reconcileWorkloads(declared, {
+      db: workloadDb,
+      driver: supervisorDriver,
+      installerOpts: { driver: supervisorDriver },
+    });
+    const summary = summarizeReconcile(raw);
+    console.log(`[workloads] reconcile (${source}): ${summary}`);
+    return { summary, raw };
+  }
+
+  // Register workload.* action handlers now that we have the DB/driver.
+  if (workloadDb && supervisorDriver) {
+    commandHandlers.set("workload.reconcile", async () => {
+      const out = await runWorkloadReconcile("command");
+      return { success: true, output: JSON.stringify(out?.raw ?? {}) };
+    });
+
+    commandHandlers.set("workload.install", async (params) => {
+      const workloadId = params.workload_id as string | undefined;
+      if (!workloadId) {
+        return { success: false, output: "workload_id required" };
+      }
+      const declared = (cachedConfig?.workloads ?? []) as WorkloadDeclaration[];
+      const decl = declared.find((d) => d.id === workloadId);
+      if (!decl) {
+        return {
+          success: false,
+          output: `workload ${workloadId} not declared for this machine`,
+        };
+      }
+      const out = await reconcileWorkloads([decl], {
+        db: workloadDb,
+        driver: supervisorDriver,
+        installerOpts: { driver: supervisorDriver },
+      });
+      return { success: true, output: JSON.stringify(out) };
+    });
+
+    commandHandlers.set("workload.status", async (params) => {
+      const workloadId = params.workload_id as string | undefined;
+      if (workloadId) {
+        const r = workloadDb.get(workloadId);
+        if (!r) return { success: false, output: `no record for ${workloadId}` };
+        return { success: true, output: JSON.stringify(r) };
+      }
+      return { success: true, output: JSON.stringify(workloadDb.list()) };
+    });
+
+    commandHandlers.set("workload.reload", async (params) => {
+      const workloadId = params.workload_id as string | undefined;
+      if (!workloadId) {
+        return { success: false, output: "workload_id required" };
+      }
+      const r = workloadDb.get(workloadId);
+      if (!r) return { success: false, output: `not installed: ${workloadId}` };
+      const plistPath = `${process.env.HOME}/Library/LaunchAgents/${r.supervisor_label}.plist`;
+      try {
+        await supervisorDriver.unload(r.supervisor_label);
+        await supervisorDriver.load(r.supervisor_label, plistPath);
+        workloadDb.updateState(workloadId, "loaded", null);
+        return { success: true, output: `reloaded ${workloadId}` };
+      } catch (err: any) {
+        workloadDb.updateState(workloadId, "install_failed", err?.message ?? String(err));
+        return { success: false, output: err?.message ?? String(err) };
+      }
+    });
+
+    commandHandlers.set("workload.remove", async (params) => {
+      const workloadId = params.workload_id as string | undefined;
+      if (!workloadId) {
+        return { success: false, output: "workload_id required" };
+      }
+      const r = workloadDb.get(workloadId);
+      if (!r) return { success: true, output: `not installed: ${workloadId}` };
+      try {
+        await supervisorDriver.unload(r.supervisor_label);
+        workloadDb.delete(workloadId);
+        return { success: true, output: `removed ${workloadId}` };
+      } catch (err: any) {
+        return { success: false, output: err?.message ?? String(err) };
+      }
+    });
+  }
+
   console.log(`[agent] starting`);
   console.log(`  Machine ID: ${config.machineId}`);
   console.log(`  Control:    ${config.controlUrl}`);
@@ -830,6 +945,12 @@ async function runAgent() {
             machine_id: config.machineId,
           };
           ws!.send(JSON.stringify(ack));
+
+          // Trigger workload reconcile on every config apply — new or
+          // changed workload declarations converge immediately.
+          runWorkloadReconcile("config_update").catch((err) =>
+            console.error("[workloads] reconcile failed:", err)
+          );
         }
         return;
       }
@@ -955,6 +1076,14 @@ async function runAgent() {
     );
   } else {
     console.log("[agent] observatory proxy disabled");
+  }
+
+  // Boot-time workload reconcile — heals drift (e.g., post-reboot the
+  // agent comes up, cached config has workloads but launchd forgot them).
+  if (workloadsEnabled && (cachedConfig?.workloads?.length ?? 0) > 0) {
+    runWorkloadReconcile("boot").catch((err) =>
+      console.error("[workloads] boot reconcile failed:", err)
+    );
   }
 
   // Connect to control plane
