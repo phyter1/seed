@@ -373,3 +373,31 @@ Router's `/v1/models` on the MLX backend reports all three models cached: `Qwen3
 - **The router upgrade alone doesn't swap the MLX runtime.** When v1.1.1's router died, its detached MLX child (mlx-lm, pid 1125) survived. v1.2.0's router came up, probed :8080 via `waitForMlxReady()`, got a 200, logged `[router] ready.`, and happily proxied requests to the *old* mlx-lm server. Clients saw mlx-lm's `prompt_tokens`/`completion_tokens` usage shape even after the router was on 1.2.0. Fix: killed the stale child to force the new router to spawn mlx-vlm via its own supervisor. **An installer that stops/kills detached MLX children on upgrade (or a preinstall hook in the router manifest) would avoid this class of "zombie runtime" after a runtime-swapping version bump.**
 - **The telemetry OTLP wire-format is a cross-package contract.** The brief treated the rename as router-local. Keeping it internal was the right call here, but the broader telemetry schema (token counts, event types, attribute conventions) could use a single-source-of-truth module that both router and normalizer import.
 
+---
+
+## Follow-up 2026-04-05 — diagnosis triad (zombie runtime, telemetry rename, skip audit)
+
+Three diagnosis-only tasks. No source changes; one doc commit.
+
+### Issues filed
+
+- **phyter1/seed#45** — `fleet: workload upgrade can leave detached child from prior version running (zombie runtime)`. Labels `reliability`, `fleet`. Generalizes the "mlx-lm kept serving after router upgraded to 1.2.0" surprise from the PR #44 deploy. Cites `workload-installer.ts:638-641` (unload→load path, which `launchctl bootout` doesn't use to reap detached children) and `router.ts:196-227` (`ensureMlxAlive()` as liveness-only, no runtime-identity check). Two fix candidates offered, none picked.
+- **phyter1/seed#46** — `telemetry: rename tokens_prompt/tokens_completion OTLP keys to tokens_input/tokens_output`. Labels `telemetry`, `refactor` (both created). Catalogs all call sites across router emitters (7), router tests (5 test cases), normalizer (1), control-plane tests (2), and docs (1). Confirmed **not** schema-bound: fleet/control DB stores the aggregated `token_count`, not per-direction columns. Flags that `packages/inference/queue/src/db.ts` has its own `tokens_prompt`/`tokens_completion` columns (different product, out of scope). Proposed single atomic PR with coupled router + control-plane deploy.
+
+### Skipped-test audit
+
+- **Doc:** `docs/SKIPPED-TESTS-AUDIT-2026-04-05.md` — committed to main as `3157079` (push confirmed).
+- **Total:** 0 skipped tests across the three CI-covered packages. 0 across the whole repo.
+- **Per-package:** fleet/control 0, memory 0, inference/router 0.
+- **Per-bucket:** Keep 0, Delete 0, Fix 0, Unclear 0.
+- The "~28 skipped tests" line referenced in this handoff (§"Known behavior quirks") and in the orchestrator prompt **does not match the codebase**. `git log -S".skip("` and `-S".only("` show zero history of these directives ever being added or removed. Either the count was inferred from a non-source signal or it's outdated. Audit doc recommends dropping the line from the next-moves list and (optionally) adding a grep-based CI guard to make zero-skips an invariant.
+
+### Surprises
+
+- Expected to triage ~28 skipped tests, found zero. The audit became an exercise in "confirm the debt doesn't exist" rather than bucketing it. The zero-skip invariant is worth preserving explicitly in CI if it isn't already load-bearing elsewhere.
+- Issue #46's scope note about `packages/inference/queue/src/db.ts` having `tokens_prompt`/`tokens_completion` columns means a future naive grep-and-replace on the rename would quietly change a SQLite schema in an unrelated package. Flagged in the issue body but worth flagging in the PR checklist too when someone picks it up.
+
+### This session
+
+No code commits, no test changes. One doc commit on main (the audit). This follow-up append is left **uncommitted** per the orchestrator's instruction.
+
