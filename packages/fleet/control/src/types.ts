@@ -414,6 +414,7 @@ export const ACTION_WHITELIST = [
   "workload.remove",
   "workload.status",
   "workload.reconcile",
+  "workload.gc",
 ] as const;
 
 export type ActionName = (typeof ACTION_WHITELIST)[number];

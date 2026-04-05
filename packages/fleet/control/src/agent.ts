@@ -41,6 +41,7 @@ import {
   reconcile as reconcileWorkloads,
   type ReconcileSummary,
 } from "./workload-runner";
+import { gcWorkload, type GcWorkloadReport } from "./workload-installer";
 import type { WorkloadDeclaration } from "./types";
 
 function summarizeReconcile(s: ReconcileSummary): string {
@@ -905,6 +906,54 @@ async function runAgent() {
         workloadDb.updateState(workloadId, "install_failed", err?.message ?? String(err));
         return { success: false, output: err?.message ?? String(err) };
       }
+    });
+
+    commandHandlers.set("workload.gc", async (params) => {
+      const targetId = params.workload_id as string | undefined;
+      const keepPrior =
+        typeof params.keep_prior === "number"
+          ? (params.keep_prior as number)
+          : 1;
+      const includeTmp = params.include_tmp === true;
+      const dryRun = params.dry_run === true;
+
+      // Determine which workload IDs to GC. If targetId is given, do
+      // just that one (even if no record exists — there may still be
+      // orphaned install-dirs/artifacts for it). Otherwise, union the
+      // declared workloads with whatever the DB knows about, so we
+      // catch removed-but-not-cleaned-up workloads too.
+      const declared = (cachedConfig?.workloads ?? []) as WorkloadDeclaration[];
+      const knownIds = new Set<string>();
+      if (targetId) {
+        knownIds.add(targetId);
+      } else {
+        for (const d of declared) knownIds.add(d.id);
+        for (const r of workloadDb.list()) knownIds.add(r.workload_id);
+      }
+
+      const reports: GcWorkloadReport[] = [];
+      for (const id of knownIds) {
+        const record = workloadDb.get(id);
+        const currentVersion = record?.version ?? null;
+        reports.push(
+          gcWorkload(id, currentVersion, { keepPrior, includeTmp, dryRun })
+        );
+      }
+
+      const totalBytesFreed = reports.reduce(
+        (sum, r) => sum + r.bytesFreed,
+        0
+      );
+      return {
+        success: true,
+        output: JSON.stringify({
+          dry_run: dryRun,
+          keep_prior: keepPrior,
+          include_tmp: includeTmp,
+          total_bytes_freed: totalBytesFreed,
+          workloads: reports,
+        }),
+      };
     });
 
     commandHandlers.set("workload.remove", async (params) => {

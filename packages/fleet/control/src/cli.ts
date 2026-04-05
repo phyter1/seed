@@ -918,6 +918,198 @@ async function cmdUpgrade(args: string[]) {
   if (failed.length > 0) process.exit(1);
 }
 
+// --- Workload GC ---
+
+interface WorkloadGcArgs {
+  machineId: string;
+  workloadId?: string;
+  keepPrior: number;
+  includeTmp: boolean;
+  dryRun: boolean;
+}
+
+function parseWorkloadGcArgs(args: string[]): WorkloadGcArgs {
+  let machineId: string | undefined;
+  let workloadId: string | undefined;
+  let keepPrior = 1;
+  let includeTmp = false;
+  let dryRun = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--machine" && args[i + 1]) machineId = args[++i];
+    else if (a === "--workload" && args[i + 1]) workloadId = args[++i];
+    else if (a === "--keep-prior" && args[i + 1]) {
+      const n = parseInt(args[++i], 10);
+      if (Number.isNaN(n)) {
+        console.error("--keep-prior must be an integer");
+        process.exit(1);
+      }
+      keepPrior = n;
+    } else if (a === "--include-tmp") includeTmp = true;
+    else if (a === "--dry-run") dryRun = true;
+    else {
+      console.error(`Unknown argument: ${a}`);
+      console.error(
+        "Usage: seed fleet workload gc --machine <id> [--workload <id>] [--keep-prior N] [--include-tmp] [--dry-run]"
+      );
+      process.exit(1);
+    }
+  }
+
+  if (!machineId) {
+    console.error("--machine <id> is required");
+    console.error(
+      "Usage: seed fleet workload gc --machine <id> [--workload <id>] [--keep-prior N] [--include-tmp] [--dry-run]"
+    );
+    process.exit(1);
+  }
+
+  return { machineId, workloadId, keepPrior, includeTmp, dryRun };
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const kb = n / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  return `${(mb / 1024).toFixed(2)} GB`;
+}
+
+interface WorkloadGcReportPayload {
+  dry_run: boolean;
+  keep_prior: number;
+  include_tmp: boolean;
+  total_bytes_freed: number;
+  workloads: Array<{
+    workloadId: string;
+    currentVersion: string | null;
+    installDirs: { removed: string[]; bytesFreed: number };
+    artifacts: { removed: string[]; bytesFreed: number };
+    tmpOrphans: { removed: string[]; bytesFreed: number };
+    bytesFreed: number;
+  }>;
+}
+
+function printWorkloadGcReport(
+  machineId: string,
+  report: WorkloadGcReportPayload
+): void {
+  const mode = report.dry_run ? "dry-run" : "applied";
+  console.log("");
+  console.log(
+    `${machineId}: workload gc [${mode}] (keep-prior=${report.keep_prior}, include-tmp=${report.include_tmp})`
+  );
+
+  if (report.workloads.length === 0) {
+    console.log("  (no workloads found)");
+    return;
+  }
+
+  for (const w of report.workloads) {
+    const current = w.currentVersion ?? "(not installed)";
+    console.log(`  ${w.workloadId} — current: ${current}`);
+    const sections: Array<[string, { removed: string[]; bytesFreed: number }]> = [
+      ["install-dirs", w.installDirs],
+      ["artifacts", w.artifacts],
+      ["tmp orphans", w.tmpOrphans],
+    ];
+    let anyActivity = false;
+    for (const [label, section] of sections) {
+      if (section.removed.length === 0) continue;
+      anyActivity = true;
+      console.log(
+        `    ${label} (${section.removed.length}, ${formatBytes(section.bytesFreed)}):`
+      );
+      for (const name of section.removed) console.log(`      - ${name}`);
+    }
+    if (!anyActivity) {
+      console.log("    nothing to remove");
+    } else {
+      console.log(`    subtotal: ${formatBytes(w.bytesFreed)}`);
+    }
+  }
+
+  console.log("");
+  console.log(`Total freed: ${formatBytes(report.total_bytes_freed)}`);
+  if (report.dry_run) {
+    console.log("(dry-run: no files were deleted. Re-run without --dry-run to apply.)");
+  }
+}
+
+async function cmdWorkloadGc(args: string[]) {
+  const opts = parseWorkloadGcArgs(args);
+
+  const params: Record<string, unknown> = {
+    keep_prior: opts.keepPrior,
+    include_tmp: opts.includeTmp,
+    dry_run: opts.dryRun,
+  };
+  if (opts.workloadId) params.workload_id = opts.workloadId;
+
+  process.stdout.write(
+    `  ${opts.machineId}: dispatching workload.gc${opts.workloadId ? ` (${opts.workloadId})` : ""}... `
+  );
+  let dispatch: { command_id?: string };
+  try {
+    dispatch = (await apiPost(`/v1/fleet/${opts.machineId}/command`, {
+      action: "workload.gc",
+      params,
+      timeout_ms: 60_000,
+    })) as { command_id?: string };
+  } catch (err: any) {
+    console.log(`FAIL (${err?.message ?? err})`);
+    process.exit(1);
+  }
+
+  const commandId = dispatch.command_id;
+  if (!commandId) {
+    console.log("dispatched (no command_id; check `seed fleet audit`)");
+    return;
+  }
+
+  console.log("dispatched. waiting for result...");
+  const result = await waitForCommandResult(opts.machineId, commandId, 60_000);
+  if (!result) {
+    console.log("  result pending — re-check with: seed fleet audit --limit 10");
+    return;
+  }
+
+  if (!result.success) {
+    console.log(`  ✗ ${result.output ?? "workload.gc failed"}`);
+    process.exit(1);
+  }
+
+  let payload: WorkloadGcReportPayload;
+  try {
+    payload = JSON.parse(result.output ?? "{}") as WorkloadGcReportPayload;
+  } catch (err: any) {
+    console.log(`  ✓ ok, but couldn't parse report: ${result.output ?? ""}`);
+    return;
+  }
+  printWorkloadGcReport(opts.machineId, payload);
+}
+
+async function cmdWorkload(args: string[]) {
+  const sub = args[0];
+  switch (sub) {
+    case "gc":
+      await cmdWorkloadGc(args.slice(1));
+      break;
+    default:
+      console.error("Usage: seed fleet workload <subcommand>");
+      console.error("");
+      console.error("Subcommands:");
+      console.error(
+        "  gc --machine <id> [--workload <id>] [--keep-prior N] [--include-tmp] [--dry-run]"
+      );
+      console.error("     Garbage-collect old install-dirs, stale artifact");
+      console.error("     tarballs, and (opt-in) /tmp bootstrap orphans");
+      process.exit(sub ? 1 : 0);
+  }
+}
+
 // --- Control-plane update ---
 
 async function cmdUpgradeControlPlane(args: string[]) {
@@ -1359,6 +1551,10 @@ async function main() {
       await cmdInstalls(args.slice(1));
       break;
 
+    case "workload":
+      await cmdWorkload(args.slice(1));
+      break;
+
     case "audit": {
       let limit = 100;
       const limitIdx = args.indexOf("--limit");
@@ -1402,6 +1598,14 @@ async function main() {
         "  installs [<install_id>] [--status S] [--follow] [--events]"
       );
       console.log("                      Observe install sessions");
+      console.log(
+        "  workload gc --machine <id> [--workload <id>] [--keep-prior N]"
+      );
+      console.log("              [--include-tmp] [--dry-run]");
+      console.log(
+        "                      Clean up old install-dirs, stale artifact"
+      );
+      console.log("                      tarballs, and /tmp bootstrap orphans");
       console.log(
         "  join <url> [--machine-id <id>] [--display-name <name>]  Register this machine with a control plane"
       );
