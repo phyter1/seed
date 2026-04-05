@@ -291,6 +291,29 @@ Release CI (`.github/workflows/release.yml`) builds both `packages/fleet/control
 - **Tests co-located with source** (`*.test.ts` next to the file).
 - **Additive migrations only**. Never drop columns without a migration script. For schema changes that require data loss (e.g., embedding dim change), warn loudly and require explicit operator action (e.g., `/backfill`).
 
+### Git hooks (gitleaks pre-push)
+
+This repo ships hooks under `.githooks/`. `setup/install-deps.sh` enables them
+by setting `core.hooksPath = .githooks` and installs `gitleaks`. If you didn't
+run that script, enable manually:
+
+```bash
+brew install gitleaks          # or the linux binary download in install-deps.sh
+git config core.hooksPath .githooks
+```
+
+- **`.githooks/pre-push`** runs `gitleaks git` against the commits being
+  pushed (range `remote_sha..local_sha`, or `local_sha --not --remotes=origin`
+  for new branches). Fails hard if gitleaks isn't on PATH — push is where code
+  leaves your machine.
+- **`.githooks/pre-commit`** runs `gitleaks protect --staged` on the commit
+  boundary. Permissive: skips if gitleaks isn't installed.
+- **`.gitleaks.toml`** extends the default ruleset (`[extend].useDefault =
+  true`) and allowlists template examples + the sensitivity profile's own
+  fake-secret test fixtures.
+
+Bypass for a single push only if you're certain: `git push --no-verify`.
+
 ### Working in worktrees
 
 For non-trivial changes, work in a worktree to keep main clean:
