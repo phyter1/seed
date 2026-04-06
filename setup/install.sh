@@ -22,6 +22,7 @@
 #   --control-url <url>    Control plane URL (wss://... or https://...)
 #   --machine-id <id>      Machine ID (defaults to `hostname -s`)
 #   --display-name <name>  Human-readable display name (optional)
+#   --operator-token <tok> Operator token for CLI (writes cli.json)
 #   --version <tag>        Pin a specific release tag (default: latest)
 #   --telemetry-url <url>  Control plane URL to report install events to.
 #                          Defaults to --control-url (http/https form).
@@ -41,6 +42,7 @@ REPO="phyter1/seed"
 BIN_DIR="$HOME/.local/bin"
 CONFIG_DIR="$HOME/.config/seed-fleet"
 AGENT_CONFIG="$CONFIG_DIR/agent.json"
+CLI_CONFIG="$CONFIG_DIR/cli.json"
 SERVICE_LABEL="com.seed.agent"
 
 # Platform-specific paths (resolved after OS detection).
@@ -57,6 +59,7 @@ DRY_RUN=false
 TELEMETRY_URL=""
 TELEMETRY_URL_SET=false
 INSTALL_ID=""
+OPERATOR_TOKEN=""
 INSTALL_RUNTIMES=true
 RUNTIME_WARNINGS=""
 
@@ -90,6 +93,7 @@ while [ $# -gt 0 ]; do
     --machine-id) MACHINE_ID="$2"; shift 2 ;;
     --display-name) DISPLAY_NAME="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
+    --operator-token) OPERATOR_TOKEN="$2"; shift 2 ;;
     --telemetry-url) TELEMETRY_URL="$2"; TELEMETRY_URL_SET=true; shift 2 ;;
     --no-runtimes) INSTALL_RUNTIMES=false; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
@@ -608,6 +612,38 @@ else
 fi
 
 # ------------------------------------------------------------------------
+# Write CLI config (when --operator-token provided)
+# ------------------------------------------------------------------------
+if [ -n "${OPERATOR_TOKEN:-}" ]; then
+  if [ -z "$CONTROL_URL" ]; then
+    warn "No --control-url provided; CLI config will use the default URL"
+    CLI_CONTROL_URL="$( [ -f "$AGENT_CONFIG" ] && python3 -c "import json,sys; print(json.load(open('$AGENT_CONFIG')).get('control_url',''))" 2>/dev/null || true )"
+    # Convert ws(s):// to http(s):// for the CLI
+    case "$CLI_CONTROL_URL" in
+      wss://*) CLI_CONTROL_URL="https://${CLI_CONTROL_URL#wss://}" ;;
+      ws://*)  CLI_CONTROL_URL="http://${CLI_CONTROL_URL#ws://}" ;;
+    esac
+    [ -z "$CLI_CONTROL_URL" ] && CLI_CONTROL_URL="http://localhost:4310"
+  else
+    # Convert ws(s):// to http(s):// for the CLI
+    case "$CONTROL_URL" in
+      wss://*) CLI_CONTROL_URL="https://${CONTROL_URL#wss://}" ;;
+      ws://*)  CLI_CONTROL_URL="http://${CONTROL_URL#ws://}" ;;
+      *)       CLI_CONTROL_URL="$CONTROL_URL" ;;
+    esac
+  fi
+  run "mkdir -p '$CONFIG_DIR'"
+  cat > "$CLI_CONFIG" <<CLIJSON
+{
+  "control_url": "$CLI_CONTROL_URL",
+  "operator_token": "$OPERATOR_TOKEN"
+}
+CLIJSON
+  chmod 600 "$CLI_CONFIG"
+  info "CLI config written to $CLI_CONFIG"
+fi
+
+# ------------------------------------------------------------------------
 # Install + load service (platform-specific)
 # ------------------------------------------------------------------------
 case "$OS" in
@@ -764,8 +800,11 @@ else
   printf '  Unit:    %s\n' "$SYSTEMD_UNIT_PATH"
 fi
 
+printf '  Config:  %s\n' "$AGENT_CONFIG"
+if [ -n "${OPERATOR_TOKEN:-}" ]; then
+  printf '  CLI:     %s\n' "$CLI_CONFIG"
+fi
 cat <<EOF
-  Config:  $AGENT_CONFIG
   Logs:    $LOG_PATH
 
 Next steps:
@@ -777,5 +816,13 @@ Next steps:
        $SERVICE_HINT
   4. Check status from the control plane:
        seed status
-
 EOF
+if [ -n "${OPERATOR_TOKEN:-}" ]; then
+  info "CLI configured — 'seed status' should work immediately."
+else
+  cat <<EOF
+  5. Configure the CLI:
+       seed fleet configure --control-url <url> --operator-token <token>
+EOF
+fi
+echo
