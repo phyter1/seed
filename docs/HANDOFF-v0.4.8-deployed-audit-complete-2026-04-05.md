@@ -683,3 +683,102 @@ Wired `@seed/memory` (HTTP service on ren1:19888) into the heartbeat so every be
 - **No host adapter changes**: The host adapter sees a longer prompt file, nothing else.
 - **Deduplication**: Semantic search and recency queries may overlap. `awk '!seen[$0]++'` removes exact-match duplicates before injection.
 
+---
+
+## Follow-up: CLI config resolution on non-CP hosts — investigation (2026-04-06)
+
+### Original hypothesis
+
+The CLI (`packages/fleet/control/src/cli.ts`) was reported as failing on non-control-plane hosts (ren1, ren3) because:
+- No `~/.config/seed-fleet/cli.json` exists
+- URL defaults to `localhost:4310` (wrong — CP is on ren2)
+- Token is undefined (auth header omitted)
+
+### Actual state (verified via SSH)
+
+**The CLI works on all three machines.** Someone already ran `seed fleet configure` on ren1 (Apr 5 09:59) and ren3 (Apr 5 10:04). Both have `cli.json` with:
+```json
+{
+  "control_url": "http://ren2.local:4310",
+  "operator_token": "97217f...64203"
+}
+```
+
+`seed status` returns the full fleet table on both machines. The immediate problem is resolved.
+
+### Architectural gaps that remain
+
+**1. install.sh doesn't write cli.json**
+
+The installer (`setup/install.sh`) registers the machine with the control plane and writes `agent.json`, but does not write `cli.json`. After a fresh install, the agent connects fine (it reads `agent.json`), but the CLI is broken — it only reads `cli.json` or env vars.
+
+This means every fresh install requires a manual follow-up: `seed fleet configure --control-url http://ren2.local:4310 --operator-token <token>`. That step is not mentioned in install.sh's "Next steps" output (lines 753-781), which only covers `seed approve` and log tailing.
+
+**2. CLI doesn't fall back to agent.json**
+
+The CLI config resolution (`cli.ts:51-61`) checks env vars → `cli.json` → hardcoded default. It never looks at `agent.json`, even though that file contains `control_url`. If the CLI checked `agent.json` as a fallback layer, the URL would resolve correctly on any machine that has an agent installed — which is every machine in the fleet.
+
+**3. Token semantics prevent full fallback**
+
+The agent token in `agent.json` is a per-machine random token (256-bit hex, SHA-256 hashed on the CP side). It authenticates the agent's WebSocket connection. The operator token in `cli.json` is a shared admin credential (`OPERATOR_TOKEN` env on the CP, `main.ts:17`). The CP hashes it at startup and compares against incoming Bearer tokens on REST endpoints.
+
+These are different auth contexts. The CLI *cannot* reuse the agent token for REST API calls — the CP would reject it (401). So even if the CLI fell back to `agent.json` for the URL, it still can't get the operator token from there.
+
+### Fix options (not implemented)
+
+| Option | Scope | What it does | Limitation |
+|---|---|---|---|
+| **A. Operational** | One-time | Run `seed fleet configure` on each machine after install | Already done. But won't survive re-installs or new machines. |
+| **B. Installer writes cli.json** | `setup/install.sh` | Add `--operator-token` flag to installer. After registration, write `cli.json` alongside `agent.json`. | Requires passing the operator token to the install command, which may be a security concern (shell history, process listing). |
+| **C. CLI falls back to agent.json for URL** | `cli.ts` | Add `readAgentConfig().control_url` as a fallback between `readCliConfig()` and `DEFAULT_CONTROL_URL`. Token still requires configure or env var. | Partial fix — URL works, token still missing. But the error message shifts from "can't reach localhost:4310" to "requires operator token", which is much more actionable. |
+| **D. `seed fleet configure --discover`** | `cli.ts` | New flag that reads the local agent's `control_url` from `agent.json` and prompts/accepts the operator token. | Best UX for operators, but more code. |
+
+**Recommended approach:** C + B. The CLI should fall back to agent.json for URL (cheap, immediate improvement). The installer should accept an optional `--operator-token` and write `cli.json` when provided. Together these make fresh installs usable with minimal friction.
+
+### Token on ren2 (for reference)
+
+The operator token lives in:
+- `~/Library/LaunchAgents/com.seed.control-plane.plist` → `OPERATOR_TOKEN` env var
+- `~/.config/seed-fleet/cli.json` → `operator_token` field
+- `~/.config/seed-fleet/control-plane.json` → different value (`aaa376...`), appears to be stale or for a different purpose
+
+The same operator token (`97217f...64203`) is deployed to all three machines' `cli.json`.
+
+---
+
+## Follow-up: vec0 PK Conflict Root Cause Analysis (2026-04-06)
+
+### Summary
+
+Investigated the `pk_conflict` classification in `safeInsertEmbedding` (db.ts:528-549) to determine why duplicate memory_ids reach the vec_memories INSERT. Found two distinct bugs.
+
+### Bug 1: Concurrent backfill race — [#59](https://github.com/phyter1/seed/issues/59)
+
+**Root cause:** `backfillEmbeddings()` has no concurrency guard. Two concurrent `POST /backfill` calls both query `memoriesMissingEmbeddings()` at the start, get the same stale row list, and race to INSERT into `vec_memories`. The second INSERT per memory_id hits UNIQUE constraint violation.
+
+**Reproduced:** Yes — 5/5 pk_conflicts when two backfills run via `Promise.all()`. The `hasEmbedding()` guard in the stranded-chunks path has a TOCTOU gap (check → await embed → INSERT).
+
+**Severity:** Low — `safeInsertEmbedding` catches and classifies the error. Memory rows are preserved. But it wastes embedding compute and produces noisy logs.
+
+**Fix direction:** Process-level lock (boolean flag or Promise guard) on backfillEmbeddings.
+
+### Bug 2: storeMemory transaction rolls back on vec failure — [#60](https://github.com/phyter1/seed/issues/60)
+
+**Root cause:** `storeMemory()` (db.ts:295-327) wraps both `memories` and `vec_memories` INSERTs in one transaction. If the vec INSERT fails (dim mismatch, NaN, etc.), the ENTIRE transaction rolls back, losing the memories row.
+
+**Not directly a pk_conflict cause**, but the ingest path at memory.ts:164 and memory.ts:202 passes embeddings through this coupled transaction, while the backfill path (memory.ts:506-528) correctly decouples them.
+
+**Severity:** Medium — Embedding failures are rare in production (fixed dim, valid float embedder), but when they occur, memory content is silently and irrecoverably lost.
+
+**Fix direction:** Decouple vec INSERT from memories transaction, matching the backfill pattern.
+
+### Additional findings
+
+- `insertEmbedding()` (db.ts:508-513) — unprotected bare-throw path — is dead code in production. Only called in tests (memory.test.ts:995). Not a production risk but should be deprecated or removed.
+- WAL mode + snapshot isolation correctly prevents ingest-then-backfill races in the sequential case (Scenario 1 verified clean).
+- Chunked ingest + concurrent backfill (Scenario 3) did not reproduce pk_conflict in testing, but has a theoretical data-duplication window: between parent creation and first chunk creation, there's an `await embedder.embed()` during which backfill can see the parent as childless and re-chunk it, creating duplicate chunk rows with different IDs.
+
+### Repro script
+
+`packages/memory/scripts/repro-pk-conflict.ts` — not committed. Three scenarios: sequential ingest+backfill (clean), concurrent backfills (reproduces), chunked ingest+backfill (timing-dependent).
+
