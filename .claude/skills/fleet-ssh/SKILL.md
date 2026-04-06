@@ -1,30 +1,36 @@
 ---
 name: fleet-ssh
-description: Run a command on one or all fleet machines via SSH. Use for remote management, deployments, or distributed tasks.
+description: Escape hatch for running commands on fleet machines via SSH when the seed CLI doesn't cover the operation.
 argument-hint: <machine> <command> | all <command>
 allowed-tools: Bash
 ---
 
 # Fleet SSH
 
-Execute commands across the Ren fleet. Handles SSH key differences between machines automatically.
+> **Prefer `seed fleet` commands over SSH.** This skill is a last-resort escape hatch for operations not covered by the seed CLI. Before using this skill, check if `seed fleet --help` has a command that does what you need.
+
+Execute commands across the fleet via SSH. Use this for arbitrary shell commands that the seed CLI doesn't have a typed command for — things like checking process lists, reading logs, managing launchd services, or running ad-hoc diagnostics.
 
 ## Arguments
 
 `$ARGUMENTS` format: `<target> <command>`
 
-- `machine1 <cmd>` — run on machine1
-- `machine2 <cmd>` — run on machine2
-- `machine3 <cmd>` — run on machine3
-- `all <cmd>` — run on machine1, machine2, and machine3 in parallel
+- `ren1 <cmd>` — run on ren1
+- `ren2 <cmd>` — run on ren2
+- `ren3 <cmd>` — run on ren3
+- `all <cmd>` — run on ren1, ren2, and ren3 in parallel
 
 ## Machine Access
 
+SSH works via ssh-agent with the default key. The connection is the same for all machines:
+
 | Target | SSH Command |
 |--------|-------------|
-| machine1 | `ssh -i ~/.ssh/fleet_key $USER@$MACHINE1 '<cmd>' 2>&1 \|\| ssh $USER@$MACHINE1 '<cmd>' 2>&1` |
-| machine2 | `ssh -i ~/.ssh/fleet_key $USER@$MACHINE2 '<cmd>' 2>&1 \|\| ssh $USER@$MACHINE2 '<cmd>' 2>&1` |
-| machine3 | `ssh $USER@$MACHINE3 '<cmd>' 2>&1` |
+| ren1 | `ssh ryanlowe@ren1.local '<cmd>' 2>&1` |
+| ren2 | `ssh ryanlowe@ren2.local '<cmd>' 2>&1` |
+| ren3 | `ssh ryanlowe@ren3.local '<cmd>' 2>&1` |
+
+If on the target machine already (check `hostname`), just run the command locally.
 
 ## Execution
 
@@ -45,7 +51,7 @@ Run the command on all three machines **in parallel** using separate Bash tool c
 
 ## Examples
 
-- `machine1 uptime` — check machine1 uptime
+- `ren1 uptime` — check ren1 uptime
 - `all git -C ~/code/existential pull` — pull existential on all machines
-- `machine2 launchctl list | grep ren` — check services on machine2
+- `ren2 launchctl list | grep ren` — check services on ren2
 - `all ps -eo %cpu,%mem,comm -r | head -5` — top processes on all machines
