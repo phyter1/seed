@@ -500,3 +500,32 @@ Worker investigation of `self-update.ts` + `cli.ts` + `agent.ts` discovered that
 - **Single port per workload.** The current logic takes the *first* `_PORT` env key it finds. Workloads binding multiple ports would need a scan-all approach.
 - **No integration test against a real port.** The unit tests mock `Bun.spawn`. A smoke test binding an actual port and verifying the fence kills it would increase confidence.
 
+---
+
+## Follow-up: #43 launchd exit 5 — 2026-04-06
+
+### What shipped
+
+**PR:** phyter1/seed#51 — `fix(fleet): treat launchctl bootstrap exit 5 as idempotent when service is in-domain`
+**Branch:** `fix/launchd-exit-5-idempotent`
+
+During workload re-installs, `launchctl bootstrap` returns exit 5 (EIO) when the domain is in a transitional state after a recent bootout. The existing `isLoaded()` fallback used `launchctl list`, which also races during transitions — `list` has narrower visibility and misses services mid-transition. Replaced the fallback with a new private `isInDomain()` helper that uses `launchctl print gui/<uid>/<label>`, which has broader domain visibility and correctly confirms presence even during the bootout→bootstrap race window.
+
+**Changes:**
+- Added `isInDomain(domain, label)` — private helper using `launchctl print`
+- Updated `load()` to call `isInDomain()` instead of `isLoaded()` for the idempotency check
+- Updated inline comment to document both exit 5 and exit 37 as expected bootstrap codes
+- `unload()` left as-is — `isLoaded()` (via `launchctl list`) is correct for confirming absence
+- `isLoaded()` public interface unchanged
+
+### What was tested
+
+- 6 new unit tests: bootstrap exit 0/5/37 with print confirmation, bootstrap exit 5 without print confirmation (throws), unload exit 0, unload exit 113
+- Full suite: 292 pass (286 existing + 6 new), 0 fail. `tsc --noEmit` clean.
+
+### Concerns
+
+- **`launchctl print` is undocumented Apple API.** Behavior confirmed on macOS 15 (Sequoia). May change across major macOS versions — monitor on upgrades.
+- **No integration test against a real domain transition.** The bootout→bootstrap race is timing-dependent and hard to reproduce deterministically. Unit tests cover logic paths but not the actual kernel timing.
+- **Asymmetry between load/unload fallbacks.** `load()` now uses `isInDomain()` (print), `unload()` still uses `isLoaded()` (list). This is intentional — absence confirmation via `list` returning non-zero is reliable in the unload direction — but worth documenting if someone touches this code later.
+
