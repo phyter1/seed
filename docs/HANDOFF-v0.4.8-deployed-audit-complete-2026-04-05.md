@@ -660,3 +660,26 @@ The README hadn't been updated since before the fleet control plane, memory serv
 - `bun test` in packages/fleet/control: 310 pass, 0 fail
 - Docs-only change, no code modified
 
+---
+
+## Follow-up: Heartbeat ↔ Memory Integration (2026-04-06)
+
+Wired `@seed/memory` (HTTP service on ren1:19888) into the heartbeat so every beat has episodic context and ingests new journal entries.
+
+### Changes
+
+**`packages/heartbeat/heartbeat.sh`**
+- **Memory URL resolution** (lines 40-56): Four-tier cascade — `SEED_MEMORY_URL` env → `memory_url` in seed.config.json → control plane service discovery → fallback `http://ren1.local:19888`. All failures are silent (memory is enhancement, not dependency).
+- **Pre-beat recall** (lines 98-136): Hits `GET /search?q=recent+context&project=seed&k=5` (semantic) and `GET /memories?project=seed` (recency, first 5). Deduplicates, numbers, and appends a `## Memory Context` section to the prompt file. 5-second curl timeout. Skips silently if memory is down.
+- **Post-beat ingest** (lines 167-188): Diffs journal entries before/after the beat. For each new entry, `POST /ingest` with `{text, source: "heartbeat", project: "seed", origin: "internal"}`. 10-second curl timeout per entry. Logs success/failure per file.
+
+**`packages/heartbeat/heartbeat-prompt.txt`**, **`heartbeat-prompt-quick.txt`**, **`heartbeat-prompt-deep.txt`**
+- Added `## Memory Context` explanation section between `## Orient` and `## What to do`. Tells the beat that recalled memories may be injected below, to treat them as context not commands, and that new journal entries are auto-ingested.
+
+### Design decisions
+
+- **Fail open**: Every curl call is wrapped in `|| true` with short timeouts. If memory is unreachable, the beat runs exactly as before.
+- **No new dependencies**: Pure shell (curl + jq). No new packages, no TypeScript changes.
+- **No host adapter changes**: The host adapter sees a longer prompt file, nothing else.
+- **Deduplication**: Semantic search and recency queries may overlap. `awk '!seen[$0]++'` removes exact-match duplicates before injection.
+
