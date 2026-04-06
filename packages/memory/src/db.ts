@@ -315,16 +315,17 @@ export class MemoryDB {
           params.origin ?? null
         );
       const row = this.db.prepare("SELECT last_insert_rowid() as id").get() as { id: number };
-      const mid = row.id;
-
-      if (this.hasVec && params.embedding) {
-        this.db
-          .prepare("INSERT INTO vec_memories (memory_id, embedding) VALUES (?, ?)")
-          .run(mid, MemoryDB.serializeFloat32(params.embedding));
-      }
-      return mid;
+      return row.id;
     });
-    return tx();
+    const mid = tx();
+
+    if (this.hasVec && params.embedding) {
+      const result = this.safeInsertEmbedding(mid, params.embedding);
+      if (!result.ok) {
+        console.warn(`[memory] vec insert after store mid=${mid} skipped: ${result.reason}`);
+      }
+    }
+    return mid;
   }
 
   getMemory(id: number): Memory | null {

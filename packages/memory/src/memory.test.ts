@@ -918,6 +918,166 @@ describe("MemoryService.backfillEmbeddings (chunk path)", () => {
   });
 });
 
+describe("backfill concurrency", () => {
+  test("two concurrent backfillEmbeddings() — second returns alreadyRunning", async () => {
+    const { db, service } = makeService({});
+    // Pre-populate memories without embeddings
+    for (let i = 0; i < 3; i++) {
+      db.storeMemory({
+        raw_text: `Memory ${i} unique content`,
+        summary: `Summary ${i}`,
+        entities: [],
+        topics: [],
+        importance: 0.5,
+        embedding: null,
+      });
+    }
+    const [r1, r2] = await Promise.all([
+      service.backfillEmbeddings(),
+      service.backfillEmbeddings(),
+    ]);
+    // Exactly one should run, the other should be locked out
+    const ran = [r1, r2].filter((r) => !r.alreadyRunning);
+    const locked = [r1, r2].filter((r) => r.alreadyRunning);
+    expect(ran.length).toBe(1);
+    expect(locked.length).toBe(1);
+    expect(locked[0]!.embedded).toBe(0);
+    expect(locked[0]!.total).toBe(0);
+  });
+
+  test("after first completes, a new call works normally (lock released)", async () => {
+    const { db, service } = makeService({});
+    db.storeMemory({
+      raw_text: "Memory for lock release test",
+      summary: "summary",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      embedding: null,
+    });
+    const first = await service.backfillEmbeddings();
+    expect(first.alreadyRunning).toBeUndefined();
+    expect(first.embedded).toBeGreaterThan(0);
+
+    // Add another memory without embedding
+    db.storeMemory({
+      raw_text: "Second memory for lock release",
+      summary: "summary 2",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      embedding: null,
+    });
+    const second = await service.backfillEmbeddings();
+    expect(second.alreadyRunning).toBeUndefined();
+    expect(second.embedded).toBeGreaterThan(0);
+  });
+
+  test("if backfill throws, the lock is still released", async () => {
+    const db = new MemoryDB(":memory:");
+    // Create an embedder that throws on the first call
+    let callCount = 0;
+    const throwingEmbedder = {
+      async embed(_text: string): Promise<number[]> {
+        callCount++;
+        if (callCount <= 3) throw new Error("embed failure");
+        return new Array(1024).fill(0.1);
+      },
+    };
+    const llm = createFakeLLM({});
+    const service = new MemoryService({ db, embedder: throwingEmbedder, llm });
+
+    db.storeMemory({
+      raw_text: "Memory that will fail embedding",
+      summary: "summary",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      embedding: null,
+    });
+
+    // First call should throw (embedder throws)
+    await expect(service.backfillEmbeddings()).rejects.toThrow("embed failure");
+
+    // Reset embedder to succeed
+    callCount = 100;
+    db.storeMemory({
+      raw_text: "Memory after lock release",
+      summary: "summary 2",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      embedding: null,
+    });
+
+    // Lock should be released — second call should work
+    const result = await service.backfillEmbeddings();
+    expect(result.alreadyRunning).toBeUndefined();
+    expect(result.embedded).toBeGreaterThan(0);
+  });
+});
+
+describe("storeMemory vec failure isolation", () => {
+  test("bad embedding (wrong dimension) still persists the memory row", () => {
+    const db = new MemoryDB(":memory:");
+    if (!db.hasVec) return;
+
+    const mid = db.storeMemory({
+      raw_text: "important data",
+      summary: "important summary",
+      entities: ["test"],
+      topics: ["testing"],
+      importance: 0.7,
+      embedding: new Array(512).fill(0.1), // wrong dim — should be 1024
+    });
+
+    // Memory row MUST be persisted
+    const mem = db.getMemory(mid);
+    expect(mem).not.toBeNull();
+    expect(mem!.raw_text).toBe("important data");
+    expect(mem!.summary).toBe("important summary");
+
+    // vec_memories should NOT have an entry (dim mismatch)
+    expect(db.hasEmbedding(mid)).toBe(false);
+  });
+
+  test("good embedding persists both memory row and vec entry", () => {
+    const db = new MemoryDB(":memory:");
+    if (!db.hasVec) return;
+
+    const mid = db.storeMemory({
+      raw_text: "good data",
+      summary: "good summary",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      embedding: new Array(1024).fill(0.1),
+    });
+
+    const mem = db.getMemory(mid);
+    expect(mem).not.toBeNull();
+    expect(mem!.raw_text).toBe("good data");
+    expect(db.hasEmbedding(mid)).toBe(true);
+  });
+
+  test("embedding: null still works (no vec INSERT attempted)", () => {
+    const db = new MemoryDB(":memory:");
+    const mid = db.storeMemory({
+      raw_text: "no embedding",
+      summary: "summary",
+      entities: [],
+      topics: [],
+      importance: 0.5,
+      embedding: null,
+    });
+
+    const mem = db.getMemory(mid);
+    expect(mem).not.toBeNull();
+    expect(mem!.raw_text).toBe("no embedding");
+    expect(db.hasEmbedding(mid)).toBe(false);
+  });
+});
+
 describe("classifyEmbeddingInsertError", () => {
   test("pk_conflict — vec0 UNIQUE constraint message", () => {
     expect(
