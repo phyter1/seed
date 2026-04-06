@@ -50,4 +50,14 @@ jobs:
 
       - name: Test
         working-directory: ${{ matrix.package }}
-        run: bun test
+        run: |
+          set +e
+          output=$(bun test 2>&1)
+          status=$?
+          set -e
+          echo "$output"
+          if [ $status -ne 0 ]; then exit $status; fi
+          if echo "$output" | grep -qE '^\s+[0-9]+ skip'; then
+            echo "::error::Skipped tests detected — remove .skip/.todo before merging"
+            exit 1
+          fi
