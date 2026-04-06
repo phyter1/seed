@@ -140,6 +140,31 @@ async function apiPost(path: string, body?: any): Promise<any> {
   return res.json();
 }
 
+async function apiPut(path: string, body?: any): Promise<any> {
+  const url = `${getControlUrl()}${path}`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "PUT",
+      headers: getHeaders(),
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (err: any) {
+    printConnectionHint(getControlUrl());
+    process.exit(1);
+  }
+  if (!res.ok) {
+    const text = await res.text();
+    if (res.status === 401 || res.status === 403) {
+      printAuthHint(getControlUrl(), res.status, Boolean(getOperatorToken()));
+    } else {
+      console.error(`Error ${res.status}: ${text}`);
+    }
+    process.exit(1);
+  }
+  return res.json();
+}
+
 // --- Commands ---
 
 async function cmdStatus() {
@@ -1257,6 +1282,143 @@ async function cmdWorkloadStatus(args: string[]) {
   }
 }
 
+// --- Workload declare ---
+
+export interface WorkloadDeclareArgs {
+  machineId: string;
+  workloadId?: string;
+  version?: string;
+  artifactUrl?: string;
+  env: Record<string, string>;
+}
+
+export function parseWorkloadDeclareArgs(args: string[]): WorkloadDeclareArgs {
+  let machineId: string | undefined;
+  let workloadId: string | undefined;
+  let version: string | undefined;
+  let artifactUrl: string | undefined;
+  const env: Record<string, string> = {};
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--machine" && args[i + 1]) machineId = args[++i];
+    else if (a === "--version" && args[i + 1]) version = args[++i];
+    else if (a === "--artifact-url" && args[i + 1]) artifactUrl = args[++i];
+    else if (a === "--env" && args[i + 1]) {
+      const pair = args[++i];
+      const eq = pair.indexOf("=");
+      if (eq < 1) {
+        console.error(`Invalid --env value: ${pair} (expected KEY=VALUE)`);
+        process.exit(1);
+      }
+      env[pair.slice(0, eq)] = pair.slice(eq + 1);
+    } else if (!a.startsWith("--") && !workloadId) {
+      workloadId = a;
+    } else {
+      console.error(`Unknown argument: ${a}`);
+      console.error(
+        "Usage: seed fleet workload declare <id> --machine <id> --version <ver> --artifact-url <url> [--env K=V ...]"
+      );
+      process.exit(1);
+    }
+  }
+
+  if (!machineId) {
+    console.error("--machine <id> is required");
+    process.exit(1);
+  }
+
+  if (workloadId) {
+    if (!version) {
+      console.error("--version is required when declaring a workload");
+      process.exit(1);
+    }
+    if (!artifactUrl) {
+      console.error("--artifact-url is required when declaring a workload");
+      process.exit(1);
+    }
+  }
+
+  return { machineId, workloadId, version, artifactUrl, env };
+}
+
+export interface WorkloadDeclareOptions {
+  args: WorkloadDeclareArgs;
+  get: (path: string) => Promise<any>;
+  put: (path: string, body: any) => Promise<any>;
+  log: (msg: string) => void;
+}
+
+export async function runWorkloadDeclare(opts: WorkloadDeclareOptions): Promise<void> {
+  const { args, get, put, log } = opts;
+  const { machineId, workloadId, version, artifactUrl, env } = args;
+
+  if (!workloadId) {
+    // List mode
+    const data = await get(`/v1/workloads/${machineId}`);
+    const workloads = data.workloads as Array<{
+      id?: string;
+      version?: string;
+      artifact_url?: string;
+      env?: Record<string, string>;
+    }>;
+    if (!workloads || workloads.length === 0) {
+      log(`${machineId}: no workload declarations`);
+      return;
+    }
+    log("");
+    log(`  ${"ID".padEnd(20)} ${"VERSION".padEnd(12)} ARTIFACT_URL`);
+    log("  " + "-".repeat(60));
+    for (const w of workloads) {
+      const id = (w.id ?? "?").padEnd(20);
+      const ver = (w.version ?? "-").padEnd(12);
+      const url = w.artifact_url ?? "-";
+      log(`  ${id} ${ver} ${url}`);
+    }
+    return;
+  }
+
+  // Set mode: fetch existing, replace-or-append by id, PUT back
+  const data = await get(`/v1/workloads/${machineId}`);
+  const existing: Array<{
+    id: string;
+    version: string;
+    artifact_url: string;
+    env?: Record<string, string>;
+  }> = Array.isArray(data.workloads) ? data.workloads : [];
+
+  const newEntry: {
+    id: string;
+    version: string;
+    artifact_url: string;
+    env?: Record<string, string>;
+  } = { id: workloadId, version: version!, artifact_url: artifactUrl! };
+  if (Object.keys(env).length > 0) newEntry.env = env;
+
+  const idx = existing.findIndex((w) => w.id === workloadId);
+  if (idx >= 0) {
+    existing[idx] = newEntry;
+  } else {
+    existing.push(newEntry);
+  }
+
+  const result = await put(`/v1/workloads/${machineId}`, {
+    workloads: existing,
+  });
+  const pushed = result.pushed ? " (pushed)" : " (not connected)";
+  log(`${machineId}: declared ${workloadId}@${version}${pushed}`);
+}
+
+async function cmdWorkloadDeclare(args: string[]) {
+  const parsed = parseWorkloadDeclareArgs(args);
+  await runWorkloadDeclare({
+    args: parsed,
+    get: apiGet,
+    put: apiPut,
+    log: (msg) => console.log(msg),
+  });
+}
+
 async function cmdWorkload(args: string[]) {
   const sub = args[0];
   switch (sub) {
@@ -1274,6 +1436,9 @@ async function cmdWorkload(args: string[]) {
       break;
     case "status":
       await cmdWorkloadStatus(args.slice(1));
+      break;
+    case "declare":
+      await cmdWorkloadDeclare(args.slice(1));
       break;
     default:
       console.error("Usage: seed fleet workload <subcommand>");
@@ -1300,6 +1465,14 @@ async function cmdWorkload(args: string[]) {
       );
       console.error("     Garbage-collect old install-dirs, stale artifact");
       console.error("     tarballs, and (opt-in) /tmp bootstrap orphans");
+      console.error(
+        "  declare <id> --machine <id> --version <ver> --artifact-url <url> [--env K=V ...]"
+      );
+      console.error("     Declare a workload on a machine (replace-or-append by id)");
+      console.error(
+        "  declare --machine <id>"
+      );
+      console.error("     List current workload declarations for a machine");
       process.exit(sub ? 1 : 0);
   }
 }
@@ -1798,7 +1971,10 @@ async function main() {
       console.log("  workload status [<id>] --machine <id>");
       console.log("  workload gc --machine <id> [--workload <id>] [--keep-prior N]");
       console.log("              [--include-tmp] [--dry-run]");
-      console.log("                      Manage installed workloads on a machine");
+      console.log("  workload declare <id> --machine <id> --version <ver> --artifact-url <url>");
+      console.log("              [--env K=V ...]");
+      console.log("  workload declare --machine <id>");
+      console.log("                      Manage workload declarations on a machine");
       console.log(
         "  join <url> [--machine-id <id>] [--display-name <name>]  Register this machine with a control plane"
       );
