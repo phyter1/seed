@@ -9,9 +9,9 @@
     "router": "bun run src/router.ts"
   },
   "dependencies": {
-    "@seed/inference-utils": "file:../utils",
-    "@seed/jury": "file:../jury",
-    "@seed/sensitivity": "file:../sensitivity",
+    "@seed/inference-utils": "workspace:*",
+    "@seed/jury": "workspace:*",
+    "@seed/sensitivity": "workspace:*",
     "typescript": "^5.7.0"
   },
   "devDependencies": {

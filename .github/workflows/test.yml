@@ -37,10 +37,6 @@ jobs:
       - name: Install workspace dependencies
         run: bun install
 
-      - name: Install package dependencies
-        working-directory: ${{ matrix.package }}
-        run: bun install
-
       - name: Typecheck
         working-directory: ${{ matrix.package }}
         run: bunx tsc --noEmit
