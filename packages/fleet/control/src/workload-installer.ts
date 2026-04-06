@@ -499,6 +499,26 @@ function defaultLogDir(): string {
   return join(homeDir(), "Library/Logs");
 }
 
+/**
+ * Check if a port is declared in any workload's env. Scans for keys
+ * matching PORT or *_PORT (case-insensitive).
+ */
+export function isPortDeclared(
+  workloads: WorkloadDeclaration[],
+  port: number
+): boolean {
+  for (const decl of workloads) {
+    if (!decl.env) continue;
+    for (const [key, val] of Object.entries(decl.env)) {
+      const k = key.toUpperCase();
+      if (k === "PORT" || k.endsWith("_PORT")) {
+        if (String(val) === String(port)) return true;
+      }
+    }
+  }
+  return false;
+}
+
 export interface FencePortOptions {
   /** Poll interval in milliseconds. Defaults to 500. */
   pollMs?: number;

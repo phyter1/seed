@@ -41,7 +41,7 @@ import {
   reconcile as reconcileWorkloads,
   type ReconcileSummary,
 } from "./workload-runner";
-import { gcWorkload, type GcWorkloadReport } from "./workload-installer";
+import { gcWorkload, isPortDeclared, type GcWorkloadReport } from "./workload-installer";
 import type { WorkloadDeclaration } from "./types";
 
 function summarizeReconcile(s: ReconcileSummary): string {
@@ -959,6 +959,71 @@ async function runAgent() {
           total_bytes_freed: totalBytesFreed,
           workloads: reports,
         }),
+      };
+    });
+
+    commandHandlers.set("process.kill-by-port", async (params) => {
+      const port = params.port as number | undefined;
+      if (!port || typeof port !== "number" || port <= 0 || port > 65535) {
+        return { success: false, output: "port required (1-65535)" };
+      }
+      const signal = (params.signal as string | undefined) ?? "SIGTERM";
+
+      // Security: validate port belongs to a declared workload
+      const declared = (cachedConfig?.workloads ?? []) as WorkloadDeclaration[];
+      if (!isPortDeclared(declared, port)) {
+        return {
+          success: false,
+          output: `port ${port} is not declared in any workload env — refusing to kill`,
+        };
+      }
+
+      // Find PIDs on the port
+      const lsof = Bun.spawn(["lsof", "-ti", `:${port}`], { stdout: "pipe", stderr: "pipe" });
+      await lsof.exited;
+      const lsofOut = (await new Response(lsof.stdout).text()).trim();
+      if (!lsofOut) {
+        return { success: true, output: `port ${port} is not held by any process` };
+      }
+
+      const pids = lsofOut.split("\n").map(s => s.trim()).filter(Boolean);
+
+      // Kill each PID
+      const killed: string[] = [];
+      const failed: string[] = [];
+      for (const pid of pids) {
+        const kill = Bun.spawn(["kill", `-${signal.replace(/^SIG/, "")}`, pid], {
+          stdout: "pipe", stderr: "pipe",
+        });
+        await kill.exited;
+        if (kill.exitCode === 0) {
+          killed.push(pid);
+        } else {
+          failed.push(pid);
+        }
+      }
+
+      // Poll for port release (up to 5s)
+      let cleared = false;
+      for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        const check = Bun.spawn(["lsof", "-ti", `:${port}`], { stdout: "pipe", stderr: "pipe" });
+        await check.exited;
+        const still = (await new Response(check.stdout).text()).trim();
+        if (!still) { cleared = true; break; }
+      }
+
+      const result = {
+        port,
+        signal,
+        killed,
+        failed,
+        cleared,
+      };
+
+      return {
+        success: failed.length === 0 && cleared,
+        output: JSON.stringify(result),
       };
     });
 

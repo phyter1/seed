@@ -1138,3 +1138,50 @@ describe("installWorkload skips fencing when no port env", () => {
     expect(lsofCalls).toEqual([]);
   });
 });
+
+// --- isPortDeclared ---
+
+describe("isPortDeclared", () => {
+  // Dynamically import so the test file compiles even before the
+  // function is implemented (will fail at runtime → RED phase).
+  let isPortDeclared: typeof import("./workload-installer").isPortDeclared;
+
+  beforeEach(async () => {
+    ({ isPortDeclared } = await import("./workload-installer"));
+  });
+
+  test("returns true when PORT env matches", () => {
+    const workloads: WorkloadDeclaration[] = [
+      { id: "web", version: "1.0.0", artifact_url: "x", env: { PORT: "3000" } },
+    ];
+    expect(isPortDeclared(workloads, 3000)).toBe(true);
+  });
+
+  test("returns true when *_PORT env matches (e.g. ROUTER_PORT)", () => {
+    const workloads: WorkloadDeclaration[] = [
+      { id: "proxy", version: "1.0.0", artifact_url: "x", env: { ROUTER_PORT: "8080" } },
+    ];
+    expect(isPortDeclared(workloads, 8080)).toBe(true);
+  });
+
+  test("returns false when port is not declared in any workload", () => {
+    const workloads: WorkloadDeclaration[] = [
+      { id: "web", version: "1.0.0", artifact_url: "x", env: { PORT: "3000" } },
+    ];
+    expect(isPortDeclared(workloads, 9999)).toBe(false);
+  });
+
+  test("returns false (no crash) when declaration has no env", () => {
+    const workloads: WorkloadDeclaration[] = [
+      { id: "static", version: "1.0.0", artifact_url: "x" },
+    ];
+    expect(isPortDeclared(workloads, 3000)).toBe(false);
+  });
+
+  test("matches keys case-insensitively (router_port vs ROUTER_PORT)", () => {
+    const workloads: WorkloadDeclaration[] = [
+      { id: "svc", version: "1.0.0", artifact_url: "x", env: { router_port: "4000" } },
+    ];
+    expect(isPortDeclared(workloads, 4000)).toBe(true);
+  });
+});
