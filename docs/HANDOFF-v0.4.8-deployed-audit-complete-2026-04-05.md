@@ -529,3 +529,24 @@ During workload re-installs, `launchctl bootstrap` returns exit 5 (EIO) when the
 - **No integration test against a real domain transition.** The bootout→bootstrap race is timing-dependent and hard to reproduce deterministically. Unit tests cover logic paths but not the actual kernel timing.
 - **Asymmetry between load/unload fallbacks.** `load()` now uses `isInDomain()` (print), `unload()` still uses `isLoaded()` (list). This is intentional — absence confirmation via `list` returning non-zero is reliable in the unload direction — but worth documenting if someone touches this code later.
 
+---
+
+## Follow-up: Zero-skip CI guard (2026-04-06)
+
+**PR:** phyter1/seed#52
+**Branch:** `ci/zero-skip-guard`
+
+### What changed
+
+The Test step in `.github/workflows/test.yml` now captures bun test output and greps for `N skip`. If any skipped tests are detected, the step fails with an annotated error. This locks in the current invariant: 0 skipped tests across all packages.
+
+### Why
+
+The test suite has 0 skips today (292 pass in fleet/control, 104 in memory, etc). Without a CI guard, `.skip`/`.todo` tests can silently accumulate. The guard makes this a hard invariant — skip a test, CI fails, you have to either fix the test or explicitly remove the guard.
+
+### Verification
+
+- Confirmed bun prints ` N skip` when skipped tests exist and omits the line entirely when there are none
+- Grep pattern `^\s+[0-9]+ skip` matches the skip line and does not false-positive on zero-skip runs
+- Test failures still fail the step normally (exit status preserved through `set +e`/`set -e` capture)
+
