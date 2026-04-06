@@ -480,3 +480,23 @@ Worker investigation of `self-update.ts` + `cli.ts` + `agent.ts` discovered that
 3. **No in-band process kill capability.** When the zombie can't be killed by bootout, the operator has no API-mediated fallback. Requires SSH or a new agent action.
 4. **Audit ≠ telemetry.** The `/v1/audit` endpoint doesn't surface inference events. Verifying wire-contract changes (like the OTLP rename) requires a different observation path.
 
+## Follow-up: #48 port-fencing — 2026-04-05
+
+### What shipped
+
+- **`fencePort(port, workloadId)`** — exported async function in `workload-installer.ts`. Uses `lsof -ti :<port>` to detect zombie processes holding a port, `kill` to remove them, and polls every 500ms up to 5s for the port to clear. Throws with PID details on timeout.
+- **Integrated into `installWorkload()`** between step 8 (plist write) and step 9 (supervisor swap). Scans the merged env for keys matching `PORT` or `*_PORT` (case-insensitive). Skips fencing for static workloads and workloads with no port env.
+- **Comment fix** on `fetchArtifact()` — updated to reflect that `http://` and `https://` are supported (was still saying "Phase 1 only supports file://").
+- **PR:** phyter1/seed#50
+
+### What was tested
+
+- 5 new test cases for `fencePort` (port free, single PID killed, timeout throws, multiple PIDs, no-port-env skip) — all mocking `Bun.spawn`.
+- All 286 existing tests pass. `tsc --noEmit` clean.
+
+### Concerns
+
+- **`kill` without signal flag** sends SIGTERM. If a zombie ignores SIGTERM, the fence will timeout. A future iteration could escalate to SIGKILL after an initial SIGTERM grace period.
+- **Single port per workload.** The current logic takes the *first* `_PORT` env key it finds. Workloads binding multiple ports would need a scan-all approach.
+- **No integration test against a real port.** The unit tests mock `Bun.spawn`. A smoke test binding an actual port and verifying the fence kills it would increase confidence.
+
