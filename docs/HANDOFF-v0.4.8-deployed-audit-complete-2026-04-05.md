@@ -433,3 +433,50 @@ No code commits, no test changes. One doc commit on main (the audit). This follo
 - None. Grep catalog matched #46 exactly (7 catalog sites + 7 test/doc sites). No additional consumers outside queue/db.ts (explicitly out of scope).
 - `packages/inference/queue/src/db.ts` still has `tokens_prompt`/`tokens_completion` SQLite columns — different product, untouched per scope.
 
+---
+
+## Follow-up — v0.4.9 deployed + fleet-router 1.3.0 deployed (2026-04-05)
+
+**Session:** Orchestrator session 3
+
+### What shipped
+
+1. **PR #47 merged** (squash, `5aa2397`) — OTLP key rename `tokens_prompt/completion` → `tokens_input/output`. Closes #46.
+2. **seed v0.4.9 tagged** (`c1bc947`), release CI green, all binaries published to GitHub Releases.
+3. **Fleet rolled to v0.4.9** via `seed fleet release --version v0.4.9 --control-plane-machine ren2`. CP + all 3 agents + CLIs.
+4. **fleet-router@1.3.0** deployed to ren3 via HTTP-served artifact + `workload install`.
+5. **CLAUDE.md updated** (`87a4fad`) — replaced stale SSH CP-upgrade instructions with `upgrade-cp`/`release` commands, fixed a `git add -A` in the release workflow section.
+
+### Fleet state (verified post-deploy)
+
+| Machine | Agent | CP | Workloads |
+|---|---|---|---|
+| ren1 | 0.4.9 | — | memory@0.4.10 |
+| ren2 | 0.4.9 | 0.4.9 | — |
+| ren3 | 0.4.9 | — | fleet-router@1.3.0, fleet-topology@0.1.0 |
+
+Main at `87a4fad`, clean, origin in sync.
+
+### Zombie runtime — #45 reproduced and manually resolved
+
+During the router 1.3.0 deploy, the install command completed successfully (artifact fetched, plist updated, launchd label loaded) but the new binary never started. The old 1.2 process — a detached child not owned by the launchd label — held port 3000. Supervisor state showed `pid: null, respawnCount: 0`: launchd either never attempted to start 1.3 or silently failed on EADDRINUSE.
+
+`workload reload` did not fix it — bootout/bootstrap cycled the label but had no handle on the zombie process. Manual SSH kill of the port holder was required: `lsof -ti :3000 | xargs kill`. Once freed, launchd auto-started 1.3.0 via KeepAlive.
+
+This is a live reproduction of #45. The root cause is confirmed: installer relies on launchd label ownership to fence the old process, which breaks when the running process predates or was detached from the label. Two fix approaches identified (see new issues below).
+
+### Telemetry verification gap
+
+`/v1/audit` only captures command events (fleet operations), not inference telemetry. Unable to verify the OTLP key rename (`token_count > 0` on new keys) through the available API surface. Inference smoke test confirmed tokens flow through the router (18 input, 2 output in response), but the CP normalizer's aggregation of the renamed keys could not be observed end-to-end. This is a monitoring gap — needs a telemetry query endpoint or log access.
+
+### Investigation finding — upgrade-cp already exists
+
+Worker investigation of `self-update.ts` + `cli.ts` + `agent.ts` discovered that `seed fleet upgrade-cp` (PR #24) already ships the agent-mediated CP upgrade. The SSH workaround documented in CLAUDE.md was obsolete. No new feature code was needed — just a doc fix. This finding cancelled the planned direct-REST-endpoint feature (originally scoped as option B).
+
+### Lessons learned
+
+1. **Grep the CLI surface before planning a deploy.** The entire SSH-based runbook was unnecessary — `upgrade-cp` and `release` existed. Stale docs misled the orchestrator into scoping a feature that was already shipped.
+2. **#45 is a real, reproducible bug class.** Not a one-off from the mlx-lm→mlx-vlm migration. Any workload upgrade where the running process is a detached child of a prior supervisor cycle will zombie. Needs a port-fencing or process-kill mechanism.
+3. **No in-band process kill capability.** When the zombie can't be killed by bootout, the operator has no API-mediated fallback. Requires SSH or a new agent action.
+4. **Audit ≠ telemetry.** The `/v1/audit` endpoint doesn't surface inference events. Verifying wire-contract changes (like the OTLP rename) requires a different observation path.
+
