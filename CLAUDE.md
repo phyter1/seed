@@ -345,7 +345,7 @@ Read `packages/core/boot/BOOT.md` first. Then apply it using the canonical root-
 - `notes/inbox/` · `notes/archive/`
 
 If `self.md` exists, you are continuing a relationship. Follow the continuation flow from `packages/core/boot/BOOT.md`.
-If `self.md` does not exist, this is the first conversation. Follow the first-conversation flow.
+If `self.md` does not exist, this is the first conversation. Follow the first-conversation flow from `packages/core/boot/BOOT.md`. Identity templates are available at `packages/core/identity/*.template` — use them as structural guides, not scripts to fill in mechanically. Read `setup/first-conversation.md` for principles.
 
 After orienting, run `hostname`.
 
