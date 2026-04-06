@@ -268,6 +268,10 @@ else
   echo "All required tools present."
   echo ""
   echo "Default host runtime: $DEFAULT_HOST"
+
+  # Ensure identity scaffolding exists
+  bash "$SEED_DIR/setup/scaffold.sh"
+
   echo "Next step: open Seed with your host runtime in this directory."
   echo "  cd $(pwd) && $DEFAULT_HOST"
   echo ""

@@ -192,6 +192,12 @@ The existing Observatory proxies on fleet machines become part of the machine ag
 
 **Migration path:** Harvest Observatory's core modules into `packages/fleet/control/`, extend the existing server. The observatory repo gets archived once the control plane owns the concern.
 
+### 20. Canonical filesystem layout — root is runtime, packages/core/ is templates
+
+Identity and memory state lives at the repo root (`self.md`, `journal/`, `notes/`, etc.). Templates and scaffolding live in `packages/core/identity/`. The `setup/scaffold.sh` script renders templates to root on first setup. Root files are `.gitignore`d — they're personal, not committed.
+
+**Rationale:** One authoritative layout. Host adapters, boot contract, and documentation all reference the same paths. Templates are the source of structure; root files are the source of identity. `detect.sh` calls `scaffold.sh` at the end of a successful run, so the Quick Start entry point sets up both config and identity structure. Running `scaffold.sh` multiple times is safe — it never overwrites existing files.
+
 ---
 
 ## Open — Needs More Design
