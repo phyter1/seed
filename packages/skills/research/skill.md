@@ -1,11 +1,16 @@
 ---
 name: research
 description: Research a topic using web search, then optionally summarize with a local model. Save findings to notes/.
+category: identity
+invocable: false
 argument-hint: <topic> [--local] [--save]
-allowed-tools: Bash, Read, Write, WebFetch, WebSearch
+capabilities:
+  - shell
+  - read-files
+  - write-files
+  - web-fetch
+  - web-search
 ---
-
-<!-- Rendered from packages/skills/research/skill.md — edit the source, not this file -->
 
 # Research
 

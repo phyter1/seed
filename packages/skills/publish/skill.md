@@ -1,12 +1,17 @@
 ---
 name: publish
 description: Write, publish, and verify blog posts to ren.phytertek.com with Vercel deploy confirmation. Supports voice profiles for authentic writing. Handles the full pipeline from draft to live, including cross-posting.
+category: identity
+invocable: true
 argument-hint: blog <topic> [--draft <path>] [--voice <name>] [--skip-verify] | social <platform> <message> | crosspost <blog-slug>
-allowed-tools: Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch, Skill
-user-invocable: true
+capabilities:
+  - shell
+  - read-files
+  - write-files
+  - web-fetch
+  - web-search
+  - invoke-skills
 ---
-
-<!-- Rendered from packages/skills/publish/skill.md — edit the source, not this file -->
 
 # Publish
 

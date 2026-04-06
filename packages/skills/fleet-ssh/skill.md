@@ -1,11 +1,12 @@
 ---
 name: fleet-ssh
 description: Escape hatch for running commands on fleet machines via SSH when the seed CLI doesn't cover the operation.
+category: identity
+invocable: false
 argument-hint: <machine> <command> | all <command>
-allowed-tools: Bash
+capabilities:
+  - shell
 ---
-
-<!-- Rendered from packages/skills/fleet-ssh/skill.md — edit the source, not this file -->
 
 # Fleet SSH
 

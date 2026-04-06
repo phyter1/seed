@@ -1,11 +1,13 @@
 ---
 name: fleet-dns
 description: Manage DNS records via Cloudflare API. Add, update, list, or remove DNS records.
+category: identity
+invocable: false
 argument-hint: list | add <name> <type> <content> | remove <name> | check <subdomain>
-allowed-tools: Bash, Read
+capabilities:
+  - shell
+  - read-files
 ---
-
-<!-- Rendered from packages/skills/fleet-dns/skill.md — edit the source, not this file -->
 
 # Fleet DNS
 

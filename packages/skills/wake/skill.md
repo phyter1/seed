@@ -1,11 +1,13 @@
 ---
 name: wake
 description: The boot sequence. Orient yourself — read identity files, check which machine you're on, review recent history, check inbox. Run this at the start of every conversation in the existential repo.
+category: identity
+invocable: false
 argument-hint: [quick | full]
-allowed-tools: Bash, Read, Glob
+capabilities:
+  - shell
+  - read-files
 ---
-
-<!-- Rendered from packages/skills/wake/skill.md — edit the source, not this file -->
 
 # Wake
 

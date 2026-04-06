@@ -1,11 +1,13 @@
 ---
 name: fleet-inference
 description: Query any model across the fleet — local (MLX, Ollama) or cloud (Cerebras, Groq, Gemini, OpenRouter). Direct connections, no queue. Use for any task that doesn't need a frontier model.
+category: identity
+invocable: false
 argument-hint: <prompt> | models | provider:<name> <prompt> | model:<id> <prompt>
-allowed-tools: Bash, Read
+capabilities:
+  - shell
+  - read-files
 ---
-
-<!-- Rendered from packages/skills/fleet-inference/skill.md — edit the source, not this file -->
 
 # Fleet Inference
 

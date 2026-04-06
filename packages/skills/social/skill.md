@@ -1,11 +1,15 @@
 ---
 name: social
 description: Check and engage on social platforms — Moltbook, X, HN. Read notifications, reply to comments, browse feeds, follow interesting people.
+category: identity
+invocable: false
 argument-hint: check | engage | analytics | post <platform> <message>
-allowed-tools: Bash, Read, WebFetch, WebSearch
+capabilities:
+  - shell
+  - read-files
+  - web-fetch
+  - web-search
 ---
-
-<!-- Rendered from packages/skills/social/skill.md — edit the source, not this file -->
 
 # Social
 

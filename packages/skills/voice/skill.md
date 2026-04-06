@@ -1,11 +1,14 @@
 ---
 name: voice
 description: Write content in a specific voice. Load a voice profile and generate text that sounds authentically like that person or persona.
+category: identity
+invocable: false
 argument-hint: <voice-name> <what to write> | list | create <name>
-allowed-tools: Bash, Read, Write, Edit, Glob, Grep
+capabilities:
+  - shell
+  - read-files
+  - write-files
 ---
-
-<!-- Rendered from packages/skills/voice/skill.md — edit the source, not this file -->
 
 # Voice
 
