@@ -42,19 +42,29 @@ function guiDomain(): string {
   return `gui/${uid}`;
 }
 
+/**
+ * Check if a service is present in the launchd domain using `launchctl print`.
+ * Unlike `launchctl list`, `print` sees services during domain transitions
+ * (e.g. right after a bootout when bootstrap returns exit 5).
+ */
+async function isInDomain(domain: string, label: string): Promise<boolean> {
+  const r = await runLaunchctl(["print", `${domain}/${label}`]);
+  return r.code === 0;
+}
+
 export function createLaunchdDriver(): SupervisorDriver {
   const domain = guiDomain();
 
   return {
     async load(label: string, plistPath: string): Promise<void> {
-      // `launchctl bootstrap` fails with code 37 ("Input/output error")
-      // if the service is already loaded — treat as a no-op.
+      // `launchctl bootstrap` may fail with exit 5 (EIO) or 37 when the
+      // service is already in the domain — treat as idempotent if the
+      // service is confirmed present via `launchctl print`.
       const r = await runLaunchctl(["bootstrap", domain, plistPath]);
       if (r.code === 0) return;
-      // Idempotency: check if the service is actually loaded; if so,
-      // bootstrap's complaint is just "already loaded".
-      const loaded = await this.isLoaded(label);
-      if (loaded) return;
+      // Idempotency: use `launchctl print` which has broader visibility
+      // than `list` during domain transitions (e.g. after a recent bootout).
+      if (await isInDomain(domain, label)) return;
       throw new Error(
         `launchctl bootstrap ${domain} ${plistPath} failed (${r.code}): ${
           r.stderr.trim() || r.stdout.trim() || "unknown error"
