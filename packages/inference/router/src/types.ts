@@ -17,6 +17,8 @@ export interface ModelEntry {
   priority: number;
   /** For MLX models: does this entry need thinking mode enabled? */
   thinking?: boolean;
+  /** Network locality — "local" for on-premise, "cloud" for third-party APIs. */
+  locality?: "local" | "cloud";
 }
 
 export interface RoutingResult {

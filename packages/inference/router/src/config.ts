@@ -161,6 +161,7 @@ function loadFromSeedConfig(configPath: string): LoadedRouterConfig {
       model: model.id,
       tags: Array.from(new Set(tags)),
       priority: priority++,
+      locality: provider.locality ?? "local",
     });
   }
 

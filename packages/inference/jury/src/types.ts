@@ -6,7 +6,10 @@
 // transport — callers supply `invoke` functions that wrap whichever
 // backend (local Ollama, MLX, cloud) they want to use.
 
-import type { ChallengeConfig, ChallengeResult, Sensitivity } from "./challenge";
+import type { ChallengeConfig, ChallengeResult } from "./challenge";
+import type { SensitivityLevel } from "@seed/sensitivity";
+
+type Sensitivity = SensitivityLevel;
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
