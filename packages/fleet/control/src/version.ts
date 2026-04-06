@@ -11,7 +11,7 @@
  * binaries always report the version of the tag that produced them.
  * See `.github/workflows/release.yml` — the "Stamp version" step.
  */
-export const SEED_VERSION = "0.5.0";
+export const SEED_VERSION = "0.6.0";
 
 /** GitHub repo that publishes releases (owner/name). */
 export const SEED_REPO = "phyter1/seed";
