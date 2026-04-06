@@ -550,3 +550,29 @@ The test suite has 0 skips today (292 pass in fleet/control, 104 in memory, etc)
 - Grep pattern `^\s+[0-9]+ skip` matches the skip line and does not false-positive on zero-skip runs
 - Test failures still fail the step normally (exit status preserved through `set +e`/`set -e` capture)
 
+---
+
+## Follow-up: `process.kill-by-port` agent action (PR #53, 2026-04-06)
+
+### What
+
+Added `process.kill-by-port` to ACTION_WHITELIST and registered a command handler in the agent. This gives operators an in-band remediation path for zombie processes holding workload ports — no SSH required.
+
+### Security model
+
+The handler refuses to kill processes on ports not declared in a workload's env config (`PORT` or `*_PORT` keys, case-insensitive). This prevents arbitrary process killing through the control plane.
+
+### Extracted `isPortDeclared()`
+
+Port-validation logic was extracted into `workload-installer.ts` as a standalone exported function (alongside `fencePort`). 5 unit tests cover: PORT match, *_PORT match, no match, no env, and case-insensitive keys.
+
+### Version bump
+
+0.4.9 → 0.5.0. New ACTION_WHITELIST entry = minor version per convention.
+
+### Open questions
+
+- **`version.ts` stamp**: Changed `SEED_VERSION` from `"0.0.0-dev"` to `"0.5.0"`. The release workflow stamps this file at build time — local dev builds will now report `0.5.0` instead of `0.0.0-dev`. If this is undesirable, revert `version.ts` and keep only the `package.json` bump.
+- **Signal validation**: The handler accepts an arbitrary signal string (default `SIGTERM`). May want to whitelist signals (e.g., only `SIGTERM` and `SIGKILL`) in a follow-up.
+- **Integration test**: The handler is tested indirectly via `isPortDeclared` unit tests. A full integration test would require mocking the WebSocket + cached config state, which is non-trivial. Consider adding one if zombie remediation becomes a frequent operation.
+
