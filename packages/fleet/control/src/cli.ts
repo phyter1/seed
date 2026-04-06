@@ -20,45 +20,13 @@
 import { generateToken, hashToken } from "./auth";
 import { SEED_VERSION, SEED_REPO } from "./version";
 import { fetchRelease, runSelfUpdate, type ReleaseInfo } from "./self-update";
-
-const DEFAULT_CONTROL_URL = "http://localhost:4310";
-
-function cliConfigPath(): string {
-  return (
-    process.env.SEED_CLI_CONFIG ??
-    `${process.env.HOME}/.config/seed-fleet/cli.json`
-  );
-}
-
-interface CliConfigFile {
-  control_url?: string;
-  operator_token?: string;
-}
-
-function readCliConfig(): CliConfigFile {
-  try {
-    const text = require("fs").readFileSync(cliConfigPath(), "utf-8");
-    const parsed = JSON.parse(text);
-    return {
-      control_url: parsed.control_url,
-      operator_token: parsed.operator_token,
-    };
-  } catch {
-    return {};
-  }
-}
-
-function getControlUrl(): string {
-  return (
-    process.env.SEED_CONTROL_URL ??
-    readCliConfig().control_url ??
-    DEFAULT_CONTROL_URL
-  );
-}
-
-function getOperatorToken(): string | undefined {
-  return process.env.SEED_OPERATOR_TOKEN ?? readCliConfig().operator_token;
-}
+import {
+  cliConfigPath,
+  readCliConfig,
+  getControlUrl,
+  getOperatorToken,
+  type CliConfigFile,
+} from "./cli-config";
 
 function getHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
