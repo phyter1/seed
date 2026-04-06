@@ -53,6 +53,18 @@ Active goals for heartbeat instances to work on. Read this each pulse. Pick up w
 
 ---
 
+## Status Labels
+
+Use these consistently so heartbeat instances can triage quickly:
+
+- **(ACTIVE)** — Work is happening. Next steps are clear.
+- **(ONGOING)** — No fixed endpoint. Background activity.
+- **(BLOCKED)** — Waiting on something external. Name the blocker explicitly.
+- **(DONE)** — Completed. Keep briefly for context, then archive.
+- **(STALE)** — No progress in 5+ beats. Either reactivate with a concrete next step or mark blocked/done.
+
+When an objective is blocked, decompose the blocker: what parts can be done offline? What requires human decision? What requires an external dependency to resolve? Blocked objectives that can be partially decomposed should list the offline-viable slices as next steps.
+
 ## Tools
 
 - [Tool name] — [What it does]. Usage: `[command]`
