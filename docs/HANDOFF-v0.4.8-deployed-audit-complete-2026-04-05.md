@@ -576,3 +576,30 @@ Port-validation logic was extracted into `workload-installer.ts` as a standalone
 - **Signal validation**: The handler accepts an arbitrary signal string (default `SIGTERM`). May want to whitelist signals (e.g., only `SIGTERM` and `SIGKILL`) in a follow-up.
 - **Integration test**: The handler is tested indirectly via `isPortDeclared` unit tests. A full integration test would require mocking the WebSocket + cached config state, which is non-trivial. Consider adding one if zombie remediation becomes a frequent operation.
 
+---
+
+## Follow-up: Bun workspaces (2026-04-06)
+
+**PR:** phyter1/seed#54
+**Branch:** `feat/bun-workspaces`
+
+### Problem
+
+No root `package.json` existed. Inter-package `file:` dependencies (router → jury → utils) didn't resolve transitively on cold installs. CI had a fragile conditional pre-install hack at `.github/workflows/test.yml:37-41` that manually installed `utils` and `jury` before the router's own `bun install`. Every new package with transitive `file:` deps would need another conditional block.
+
+### What changed
+
+1. **`package.json`** (new, root) — minimal: `name`, `private: true`, `workspaces: ["packages/*", "packages/*/*"]`. No scripts, no deps, no tooling config.
+2. **`bun.lock`** (new, root) — workspace-resolved lockfile covering all 10 packages.
+3. **`.github/workflows/test.yml`** — removed the conditional `Install transitive file: dependencies (router)` step. Added a root-level `Install workspace dependencies` (`bun install`) step that runs before per-package install. The per-package `bun install` is kept for devDependencies.
+
+### What didn't change
+
+- No `file:` deps in individual `package.json` files were modified.
+- No package code was touched.
+- All 441 tests (297 + 104 + 40) pass before and after.
+
+### Why workspaces
+
+Bun workspaces resolve `file:` deps transitively from a single root install. This is the standard monorepo pattern — no hacks, no per-package conditional blocks, scales to any number of packages.
+
