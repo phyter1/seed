@@ -31,16 +31,17 @@ Seed changes that. It provides:
 git clone https://github.com/phyter1/seed.git
 cd seed
 
-# Detect your hardware and install dependencies
+# Detect your hardware, tools, and host runtimes
 bash setup/detect.sh
-bash setup/install.sh  # if anything is missing
 
 # Start your first conversation
 # Today the Claude adapter is the primary path:
 claude
 ```
 
-That is the current default adapter path. Seed's continuity system is broader than any one host runtime, but Claude is the most complete adapter in the repo today.
+`detect.sh` probes your hardware (CPU, RAM, GPU), checks for installed tools and host runtimes (Claude, Codex, Gemini), scans for model runtimes (MLX, Ollama), discovers other Seed machines on your network, and writes a `seed.config.json`.
+
+To add a machine to an existing fleet, `setup/install.sh` is a turnkey installer — it downloads the `seed-agent` binary, registers with a control plane, and starts it as a user-scoped service (launchd on macOS, systemd on Linux). No source checkout needed on the target machine.
 
 The first conversation is the beginning. No configuration wizard. Just talk.
 
@@ -75,9 +76,19 @@ seed/
 │   └── archive/                 # Processed notes
 ├── packages/
 │   ├── core/                    # Boot contract, templates, scaffolding
-│   ├── fleet/                   # Multi-machine sync and SSH
+│   ├── fleet/
+│   │   ├── control/             # Control plane, per-machine agent, CLI, workloads
+│   │   ├── topology/            # Fleet topology discovery
+│   │   ├── ssh/                 # Cross-machine SSH helpers
+│   │   └── sync/                # Git-based identity sync
 │   ├── hosts/                   # Host runtime adapters (Claude, Codex, Gemini)
-│   ├── inference/               # Queue server, model router
+│   ├── inference/
+│   │   ├── router/              # Rule-based model router (@seed/router)
+│   │   ├── jury/                # Multi-model consensus (@seed/jury)
+│   │   ├── queue/               # Priority task queue (planned)
+│   │   ├── sensitivity/         # Content sensitivity classifier (planned)
+│   │   └── utils/               # Shared inference utilities
+│   ├── memory/                  # Vector memory service (Hono + bun:sqlite + sqlite-vec)
 │   ├── providers/               # Provider adapters (Anthropic, OpenAI, Gemini, Ollama, MLX, etc.)
 │   ├── skills/                  # Operational skill library
 │   └── heartbeat/               # Autonomous pulse daemon
@@ -88,8 +99,8 @@ seed/
 │   ├── prompts/                 # SDLC role definitions
 │   └── templates/               # Document, tool, and stack templates
 ├── setup/
-│   ├── detect.sh                # Hardware detection
-│   ├── install.sh               # Dependency installation
+│   ├── detect.sh                # Hardware + tool + runtime detection
+│   ├── install.sh               # Turnkey fleet agent installer
 │   └── first-conversation.md    # Guide for the first meeting
 └── docs/                        # Architecture, philosophy, guides
 ```
@@ -102,10 +113,13 @@ Root identity files are intentionally not committed. They are created locally du
 Host-neutral boot contract plus identity and memory scaffolding. The relationship state itself lives at the repo root.
 
 ### Fleet (`packages/fleet/`)
-Git-based sync across machines. launchd/systemd service templates. Cross-machine SSH management. Optional — works fine on a single machine.
+The fleet system for managing multiple machines from a single control plane. The core is `control/` — a control plane server, per-machine agent daemon, CLI (`seed`), workload declaration and reconciliation, and a REST API. Agents connect over WebSocket, report health, and receive workload assignments. The turnkey installer (`setup/install.sh`) gets a bare machine from zero to running agent in one command. `topology/` handles fleet discovery, `ssh/` and `sync/` are lightweight helpers for cross-machine access and git-based identity sync. All machines run macOS with launchd; the installer also supports Linux with systemd. Optional — works fine on a single machine.
 
 ### Inference (`packages/inference/`)
-Priority-based task queue with capability routing. Model router that picks the best model for each request. Workers for local (MLX, Ollama) and cloud (Cerebras, Groq, Gemini, OpenRouter) providers. Optional — the AI works without local models, but having them means $0 inference and total privacy.
+Local and hybrid model inference. What's deployed today: a **rule-based router** (`router/`) that picks the right model for each request using deterministic keyword matching (zero overhead, no LLM call for routing), and a **jury system** (`jury/`) that fans a query out to multiple small models and synthesizes consensus. Both expose OpenAI-compatible endpoints. `utils/` has shared types and helpers. The `queue/` (priority task queue) and `sensitivity/` (content classifier) packages exist but are not yet wired into production. Optional — the AI works without local models, but having them means $0 inference and full privacy.
+
+### Memory (`packages/memory/`)
+Vector memory service built on Hono, bun:sqlite, and sqlite-vec. Stores memories with embeddings for semantic search, supports chunking, ingestion, summarization, and a graph layer. Runs as a standalone HTTP service. Currently deployed as a launchd workload via the fleet system.
 
 ### Skills (`packages/skills/`)
 The curated skill library:
