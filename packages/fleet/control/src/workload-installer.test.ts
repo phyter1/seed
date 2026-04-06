@@ -15,6 +15,7 @@ import {
   sweepTmpOrphans,
   gcWorkload,
   updateCurrentSymlink,
+  fencePort,
 } from "./workload-installer";
 import type { WorkloadManifest, WorkloadDeclaration } from "./types";
 import type { SupervisorDriver } from "./supervisors/launchd";
@@ -990,5 +991,150 @@ describe("installWorkload service workloads maintain current symlink", () => {
     expect(readlinkSync(join(installRoot, "test-workload-current"))).toBe(
       "test-workload-0.1.0"
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fencePort — unit tests with mocked Bun.spawn
+// ---------------------------------------------------------------------------
+
+describe("fencePort", () => {
+  let originalSpawn: typeof Bun.spawn;
+
+  beforeEach(() => {
+    originalSpawn = Bun.spawn;
+  });
+
+  afterEach(() => {
+    Bun.spawn = originalSpawn;
+  });
+
+  /** Helper: build a mock Bun.spawn that returns scripted responses. */
+  function mockSpawn(calls: { stdout: string; exitCode: number }[]) {
+    let callIndex = 0;
+    // @ts-expect-error — replacing Bun.spawn with a mock for testing
+    Bun.spawn = (cmd: string[]) => {
+      const scripted = calls[callIndex] ?? { stdout: "", exitCode: 1 };
+      callIndex++;
+      const stdout = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(scripted.stdout));
+          controller.close();
+        },
+      });
+      return {
+        stdout,
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(scripted.exitCode),
+        exitCode: scripted.exitCode,
+        pid: 0,
+        kill() {},
+      };
+    };
+  }
+
+  test("resolves immediately when port is free (lsof exit 1)", async () => {
+    mockSpawn([
+      // lsof finds nothing → exit 1
+      { stdout: "", exitCode: 1 },
+    ]);
+    await expect(fencePort(3000, "fleet-router")).resolves.toBeUndefined();
+  });
+
+  test("kills PID holding port, port clears on next poll", async () => {
+    mockSpawn([
+      // 1st lsof: port held by PID 12345
+      { stdout: "12345\n", exitCode: 0 },
+      // kill 12345
+      { stdout: "", exitCode: 0 },
+      // 2nd lsof (poll): port now free
+      { stdout: "", exitCode: 1 },
+    ]);
+    await expect(fencePort(3000, "fleet-router")).resolves.toBeUndefined();
+  });
+
+  test("throws after timeout when port stays held", async () => {
+    // Every lsof call returns the same PID — port never clears.
+    const stubbornPid = { stdout: "99999\n", exitCode: 0 };
+    const killOk = { stdout: "", exitCode: 0 };
+    // Initial lsof + kill + up to 11 poll lsof calls (5s / 500ms = 10, +1 buffer)
+    const calls = [stubbornPid, killOk];
+    for (let i = 0; i < 12; i++) calls.push(stubbornPid);
+    mockSpawn(calls);
+
+    await expect(fencePort(3000, "fleet-router", { pollMs: 100, timeoutMs: 500 }))
+      .rejects.toThrow(/port 3000 still held by PID\(s\) 99999 after fence timeout/);
+  });
+
+  test("handles multiple PIDs on the same port", async () => {
+    mockSpawn([
+      // lsof: two PIDs
+      { stdout: "111\n222\n", exitCode: 0 },
+      // kill 111
+      { stdout: "", exitCode: 0 },
+      // kill 222
+      { stdout: "", exitCode: 0 },
+      // poll: port free
+      { stdout: "", exitCode: 1 },
+    ]);
+    await expect(fencePort(3000, "fleet-router")).resolves.toBeUndefined();
+  });
+});
+
+describe("installWorkload skips fencing when no port env", () => {
+  let tmp: string;
+  let originalSpawn: typeof Bun.spawn;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "seed-nofence-"));
+    originalSpawn = Bun.spawn;
+  });
+  afterEach(() => {
+    Bun.spawn = originalSpawn;
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("no _PORT env → no lsof calls during install", async () => {
+    const lsofCalls: string[][] = [];
+    const realSpawn = originalSpawn;
+    // @ts-expect-error — partial mock to intercept lsof
+    Bun.spawn = (cmd: string[], opts?: any) => {
+      if (Array.isArray(cmd) && cmd[0] === "lsof") {
+        lsofCalls.push(cmd);
+      }
+      return realSpawn(cmd, opts);
+    };
+
+    const stageDir = join(tmp, "stage");
+    const manifest: WorkloadManifest = {
+      id: "test-nofence",
+      version: "0.1.0",
+      platform: "darwin",
+      arch: "arm64",
+      binary: "bin/worker",
+      env: { SOME_VAR: "no-port-here" },
+      supervisor: {
+        launchd: { label: "com.test.nofence", template: "templates/launchd.plist.template" },
+      },
+    };
+    const tarball = buildFakeArtifact(stageDir, manifest);
+    const driver = mockDriver();
+
+    await installWorkload(
+      {
+        id: "test-nofence",
+        version: "0.1.0",
+        artifact_url: `file://${tarball}`,
+        env: { OTHER: "value" },
+      },
+      {
+        driver,
+        installRoot: join(tmp, "installs"),
+        plistDir: join(tmp, "plists"),
+        logDir: join(tmp, "logs"),
+      }
+    );
+
+    expect(lsofCalls).toEqual([]);
   });
 });
