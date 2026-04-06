@@ -603,3 +603,28 @@ No root `package.json` existed. Inter-package `file:` dependencies (router → j
 
 Bun workspaces resolve `file:` deps transitively from a single root install. This is the standard monorepo pattern — no hacks, no per-package conditional blocks, scales to any number of packages.
 
+---
+
+## Follow-up: `seed fleet workload declare` CLI subcommand
+
+**Date:** 2026-04-06
+**PR:** phyter1/seed#55
+
+### What was added
+
+`seed fleet workload declare` — a CLI command that replaces hand-rolled `curl PUT /v1/workloads/:machine_id` for managing workload declarations.
+
+**Two modes:**
+- **Set mode:** `seed fleet workload declare <id> --machine <id> --version <ver> --artifact-url <url> [--env K=V ...]` — GETs existing declarations, replaces-or-appends by workload id, PUTs merged list back. Prints pushed/not-connected status.
+- **List mode:** `seed fleet workload declare --machine <id>` — GETs and prints a table of current declarations.
+
+Also added `apiPut` helper (follows `apiPost` pattern) and exported `parseWorkloadDeclareArgs` + `runWorkloadDeclare` with DI for testability.
+
+### Test coverage
+
+13 new tests in `cli-workload-declare.test.ts`:
+- 7 arg parsing tests (set/list modes, repeatable `--env`, values containing `=`, missing required flags)
+- 6 `runWorkloadDeclare` tests (list empty/populated, set append/replace, pushed status, env omission)
+
+All 310 tests pass. Typecheck clean.
+
