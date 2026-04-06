@@ -628,3 +628,35 @@ Also added `apiPut` helper (follows `apiPost` pattern) and exported `parseWorklo
 
 All 310 tests pass. Typecheck clean.
 
+---
+
+## Follow-up: README audit (2026-04-06)
+
+PR: phyter1/seed#56
+
+### What changed
+
+The README hadn't been updated since before the fleet control plane, memory service, and inference sub-packages landed. Several sections were stale:
+
+1. **Quick Start** described `install.sh` as a dependency installer. It's actually the turnkey fleet agent installer (downloads binary, registers with control plane, starts launchd/systemd service). `detect.sh` is the hardware/tool probe. Clarified both roles.
+
+2. **Architecture tree** was missing `packages/memory/` entirely. `packages/fleet/` showed as a flat directory when it has four sub-packages (control, topology, ssh, sync). `packages/inference/` had five sub-packages (router, jury, queue, sensitivity, utils) but the tree only showed the parent. All now expanded.
+
+3. **Packages section**:
+   - **Fleet**: Was described as "git-based sync + SSH + launchd/systemd templates." Rewritten to lead with the control plane, agent, CLI, and workload system — which is the actual substance. SSH and sync are mentioned as helpers. Removed false implication of systemd-only; all current machines run macOS/launchd, but the installer supports Linux/systemd too.
+   - **Inference**: Was described as "priority-based task queue with capability routing + workers." The queue and workers are WIP. What's deployed is the rule-based router and jury consensus system. Rewritten to distinguish deployed from planned, with `(planned)` markers in the tree.
+   - **Memory**: Was completely absent. Added a new subsection describing the Hono + bun:sqlite + sqlite-vec service.
+
+### What didn't change
+
+- "What this is" / "What this is not" sections — accurate as written
+- "How it works" (Day 1/7/30) — still a good narrative arc
+- Philosophy section — unchanged
+- License — MIT, unchanged
+
+### Verification
+
+- `bunx tsc --noEmit` in packages/fleet/control: clean
+- `bun test` in packages/fleet/control: 310 pass, 0 fail
+- Docs-only change, no code modified
+
