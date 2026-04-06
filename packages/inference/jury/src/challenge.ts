@@ -10,6 +10,7 @@
 // max_tier=local when the jury request carries sensitivity=SENSITIVE.
 
 import { extractJson, type JsonValue } from "@seed/inference-utils";
+import type { SensitivityLevel } from "@seed/sensitivity";
 import type { ChatMessage, InvokeOptions, InvokeResult, JurorResult } from "./types";
 import { minTier, nextTier, type Tier } from "./tiers";
 
@@ -18,7 +19,7 @@ export type ChallengerInvoke = (
   options: InvokeOptions,
 ) => Promise<InvokeResult>;
 
-export type Sensitivity = "SENSITIVE" | "GENERAL" | "FRONTIER";
+export type Sensitivity = SensitivityLevel;
 
 export interface ChallengeConfig {
   enabled: boolean;

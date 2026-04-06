@@ -24,6 +24,7 @@ import {
   type Provider as TelemetryProvider,
   type RouteType as TelemetryRouteType,
 } from "./telemetry";
+import { identityProfile, type ClassifiableMessage, type Classification } from "@seed/sensitivity";
 import {
   runJury as runJuryPrimitive,
   makeDefaultAggregator,
@@ -293,6 +294,16 @@ function routeRequest(content: string, options: { model?: string; thinking?: boo
 
   // 4. Default — fast general-purpose
   return { entry: fallback, reason: "default (general, fast)", needsThinking: false };
+}
+
+// ── Sensitivity Classification ────────────────────────────────────────────
+
+function classifyMessages(messages: ChatMessage[]): Classification {
+  const classifiable: ClassifiableMessage[] = messages.map(m => ({
+    role: m.role,
+    content: typeof m.content === "string" ? m.content : "",
+  }));
+  return identityProfile.classifyMessages(classifiable);
 }
 
 // ── Backend Clients ─────────────────────────────────────────────────────────
@@ -676,7 +687,7 @@ function emitAggregateTelemetry(
   }));
 }
 
-async function runJury(messages: ChatMessage[], options: { maxTokens?: number } = {}): Promise<JuryResult> {
+async function runJury(messages: ChatMessage[], options: { maxTokens?: number; sensitivity?: string } = {}): Promise<JuryResult> {
   const start = Date.now();
   const maxTokens = options.maxTokens ?? 512;
   const tasks = buildJuryTasks();
@@ -690,6 +701,7 @@ async function runJury(messages: ChatMessage[], options: { maxTokens?: number } 
       jurors: buildJurorAssignments(tasks),
       aggregator: makeRouterAggregator(maxTokens),
       maxTokens,
+      sensitivity: options.sensitivity as "SENSITIVE" | "GENERAL" | "FRONTIER" | undefined,
       queue: (id, task) => withMachineQueue(taskById.get(id)!.entry.machine, task),
       onJurorComplete: (result) => {
         const task = taskById.get(result.id);
@@ -978,8 +990,9 @@ const server = Bun.serve({
         return Response.json({ error: "messages required" }, { status: 400 });
       }
 
+      const jurySensitivity = classifyMessages(messages);
       const lastMessage = messages[messages.length - 1].content;
-      console.log(`[jury] "${lastMessage.slice(0, 60)}..." -> ${JURY_MODELS.length} jurors + aggregator (stream=${stream})`);
+      console.log(`[jury] "${lastMessage.slice(0, 60)}..." -> ${JURY_MODELS.length} jurors + aggregator (stream=${stream}, sensitivity=${jurySensitivity.level})`);
 
       if (stream) {
         const { readable, writable } = new TransformStream<Uint8Array>();
@@ -1001,7 +1014,7 @@ const server = Bun.serve({
       }
 
       try {
-        const result = await runJury(messages, { maxTokens });
+        const result = await runJury(messages, { maxTokens, sensitivity: jurySensitivity.level });
         console.log(`[jury] done [${result.totalMs}ms, agreement=${result.agreement}]`);
 
         return Response.json({
@@ -1034,12 +1047,15 @@ const server = Bun.serve({
       const requestedModel = body.model;
       const requestedThinking: boolean | undefined = body.thinking;
 
+      // Classify sensitivity before any dispatch
+      const sensitivity = messages.length > 0 ? classifyMessages(messages) : { level: "GENERAL" as const, local_only: false, reason: "empty", flags: [] };
+
       // Redirect to jury if mode=jury
       if (body.mode === "jury") {
         const lastMessage = messages[messages.length - 1]?.content ?? "";
-        console.log(`[jury] "${lastMessage.slice(0, 60)}..." (via mode=jury)`);
+        console.log(`[jury] "${lastMessage.slice(0, 60)}..." (via mode=jury, sensitivity=${sensitivity.level})`);
         try {
-          const result = await runJury(messages, { maxTokens: body.max_tokens ?? 256 });
+          const result = await runJury(messages, { maxTokens: body.max_tokens ?? 256, sensitivity: sensitivity.level });
           console.log(`[jury] done [${result.totalMs}ms, agreement=${result.agreement}]`);
           return Response.json({
             id: `jury-${Date.now()}`,
@@ -1061,7 +1077,18 @@ const server = Bun.serve({
       const stream = body.stream !== false;
       const start = Date.now();
       const lastMessage = messages[messages.length - 1].content;
-      const { entry, reason, needsThinking } = routeRequest(lastMessage, { model: requestedModel, thinking: requestedThinking });
+      let { entry, reason, needsThinking } = routeRequest(lastMessage, { model: requestedModel, thinking: requestedThinking });
+
+      // Sensitivity guard: reroute cloud entries to local when content is sensitive
+      if (sensitivity.local_only && entry.locality === "cloud") {
+        const localEntry = FLEET.find(m => m.locality !== "cloud");
+        if (localEntry) {
+          entry = localEntry;
+          reason = `sensitivity:${sensitivity.level} (rerouted from cloud)`;
+        }
+      }
+
+      console.log(`[router] sensitivity=${sensitivity.level}${sensitivity.flags.length > 0 ? ` [${sensitivity.flags.join(",")}]` : ""}`);
 
       const samplerOverrides = getSamplerSettings(needsThinking, reason);
       const temperature = body.temperature ?? samplerOverrides.temperature;
