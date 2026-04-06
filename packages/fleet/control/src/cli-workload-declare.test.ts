@@ -105,7 +105,7 @@ describe("parseWorkloadDeclareArgs", () => {
     }
   });
 
-  test("exits on missing --artifact-url in set mode", () => {
+  test("exits on missing --artifact-url in set mode (when no --stage)", () => {
     const origExit = process.exit;
     let exitCode: number | undefined;
     process.exit = ((code: number) => {
@@ -126,6 +126,62 @@ describe("parseWorkloadDeclareArgs", () => {
     } finally {
       process.exit = origExit;
     }
+  });
+
+  test("parses --stage flag", () => {
+    const result = parseWorkloadDeclareArgs([
+      "memory",
+      "--machine",
+      "ren1",
+      "--version",
+      "0.4.10",
+      "--stage",
+      "./dist/artifacts/memory-0.4.10.tar.gz",
+    ]);
+    expect(result.stage).toBe("./dist/artifacts/memory-0.4.10.tar.gz");
+    expect(result.artifactUrl).toBeUndefined();
+  });
+
+  test("exits when --stage and --artifact-url both provided", () => {
+    const origExit = process.exit;
+    let exitCode: number | undefined;
+    process.exit = ((code: number) => {
+      exitCode = code;
+      throw new Error("exit");
+    }) as never;
+    try {
+      expect(() =>
+        parseWorkloadDeclareArgs([
+          "memory",
+          "--machine",
+          "ren1",
+          "--version",
+          "0.4.10",
+          "--stage",
+          "./dist/artifact.tar.gz",
+          "--artifact-url",
+          "http://example.com/artifact.tar.gz",
+        ])
+      ).toThrow("exit");
+      expect(exitCode).toBe(1);
+    } finally {
+      process.exit = origExit;
+    }
+  });
+
+  test("--stage satisfies artifact requirement (no error for missing --artifact-url)", () => {
+    // Should NOT exit — --stage replaces --artifact-url
+    const result = parseWorkloadDeclareArgs([
+      "memory",
+      "--machine",
+      "ren1",
+      "--version",
+      "0.4.10",
+      "--stage",
+      "./dist/artifact.tar.gz",
+    ]);
+    expect(result.stage).toBe("./dist/artifact.tar.gz");
+    expect(result.workloadId).toBe("memory");
   });
 });
 

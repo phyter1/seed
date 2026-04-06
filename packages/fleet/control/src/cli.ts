@@ -1289,6 +1289,7 @@ export interface WorkloadDeclareArgs {
   workloadId?: string;
   version?: string;
   artifactUrl?: string;
+  stage?: string;
   env: Record<string, string>;
 }
 
@@ -1297,6 +1298,7 @@ export function parseWorkloadDeclareArgs(args: string[]): WorkloadDeclareArgs {
   let workloadId: string | undefined;
   let version: string | undefined;
   let artifactUrl: string | undefined;
+  let stage: string | undefined;
   const env: Record<string, string> = {};
 
   for (let i = 0; i < args.length; i++) {
@@ -1304,6 +1306,7 @@ export function parseWorkloadDeclareArgs(args: string[]): WorkloadDeclareArgs {
     if (a === "--machine" && args[i + 1]) machineId = args[++i];
     else if (a === "--version" && args[i + 1]) version = args[++i];
     else if (a === "--artifact-url" && args[i + 1]) artifactUrl = args[++i];
+    else if (a === "--stage" && args[i + 1]) stage = args[++i];
     else if (a === "--env" && args[i + 1]) {
       const pair = args[++i];
       const eq = pair.indexOf("=");
@@ -1317,10 +1320,15 @@ export function parseWorkloadDeclareArgs(args: string[]): WorkloadDeclareArgs {
     } else {
       console.error(`Unknown argument: ${a}`);
       console.error(
-        "Usage: seed fleet workload declare <id> --machine <id> --version <ver> --artifact-url <url> [--env K=V ...]"
+        "Usage: seed fleet workload declare <id> --machine <id> --version <ver> [--artifact-url <url> | --stage <path>] [--env K=V ...]"
       );
       process.exit(1);
     }
+  }
+
+  if (stage && artifactUrl) {
+    console.error("--stage and --artifact-url are mutually exclusive");
+    process.exit(1);
   }
 
   if (!machineId) {
@@ -1333,13 +1341,13 @@ export function parseWorkloadDeclareArgs(args: string[]): WorkloadDeclareArgs {
       console.error("--version is required when declaring a workload");
       process.exit(1);
     }
-    if (!artifactUrl) {
-      console.error("--artifact-url is required when declaring a workload");
+    if (!artifactUrl && !stage) {
+      console.error("--artifact-url or --stage is required when declaring a workload");
       process.exit(1);
     }
   }
 
-  return { machineId, workloadId, version, artifactUrl, env };
+  return { machineId, workloadId, version, artifactUrl, stage, env };
 }
 
 export interface WorkloadDeclareOptions {
@@ -1411,12 +1419,38 @@ export async function runWorkloadDeclare(opts: WorkloadDeclareOptions): Promise<
 
 async function cmdWorkloadDeclare(args: string[]) {
   const parsed = parseWorkloadDeclareArgs(args);
+
+  let stageClose: (() => void) | undefined;
+
+  if (parsed.stage) {
+    const { startStageServer } = await import("./stage-server");
+    const server = await startStageServer(parsed.stage);
+    parsed.artifactUrl = server.url;
+    stageClose = server.close;
+    console.log(`Staging artifact at ${server.url}`);
+  }
+
   await runWorkloadDeclare({
     args: parsed,
     get: apiGet,
     put: apiPut,
     log: (msg) => console.log(msg),
   });
+
+  if (stageClose) {
+    console.log(`\nStaging server running at ${parsed.artifactUrl}`);
+    console.log("Press Ctrl-C to stop.");
+
+    await new Promise<void>((resolve) => {
+      const handler = () => {
+        console.log("\nStopping staging server...");
+        stageClose!();
+        resolve();
+      };
+      process.on("SIGINT", handler);
+      process.on("SIGTERM", handler);
+    });
+  }
 }
 
 async function cmdWorkload(args: string[]) {
