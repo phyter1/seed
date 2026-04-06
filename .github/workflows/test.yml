@@ -54,3 +54,27 @@ jobs:
             echo "::error::Skipped tests detected — remove .skip/.todo before merging"
             exit 1
           fi
+
+  skills-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install workspace dependencies
+        run: bun install
+
+      - name: Render skills
+        run: bun run render-skills
+
+      - name: Check for drift
+        run: |
+          if ! git diff --exit-code .claude/skills/; then
+            echo "::error::Skill adapters are out of sync with sources. Run 'bun run render-skills' and commit the result."
+            exit 1
+          fi
