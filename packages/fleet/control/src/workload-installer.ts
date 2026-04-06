@@ -52,8 +52,8 @@ export interface InstallResult {
 }
 
 /**
- * Fetch an artifact tarball from a URL. Phase 1 only supports
- * `file://` URLs — HTTPS is Phase 2.
+ * Fetch an artifact tarball from a URL. Supports `file://`, `http://`,
+ * and `https://` schemes.
  */
 export async function fetchArtifact(url: string): Promise<Uint8Array> {
   if (url.startsWith("file://")) {
@@ -499,6 +499,77 @@ function defaultLogDir(): string {
   return join(homeDir(), "Library/Logs");
 }
 
+export interface FencePortOptions {
+  /** Poll interval in milliseconds. Defaults to 500. */
+  pollMs?: number;
+  /** Maximum time to wait for port to clear in milliseconds. Defaults to 5000. */
+  timeoutMs?: number;
+}
+
+/**
+ * Ensure a TCP port is free before a supervisor swap. If a detached
+ * child (not owned by the launchd label) holds the port, `lsof` finds
+ * it, `kill` removes it, and we poll until the port is clear or a
+ * timeout fires.
+ */
+export async function fencePort(
+  port: number,
+  workloadId: string,
+  opts?: FencePortOptions
+): Promise<void> {
+  const pollMs = opts?.pollMs ?? 500;
+  const timeoutMs = opts?.timeoutMs ?? 5000;
+
+  /** Run a command and return trimmed stdout. */
+  async function run(cmd: string[]): Promise<{ stdout: string; exitCode: number }> {
+    const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
+    const exitCode = await proc.exited;
+    const stdout = await new Response(proc.stdout).text();
+    return { stdout: stdout.trim(), exitCode };
+  }
+
+  /** Get PIDs holding the port via lsof. */
+  async function getPids(): Promise<string[]> {
+    const { stdout, exitCode } = await run(["lsof", "-ti", `:${port}`]);
+    if (exitCode !== 0 || stdout === "") return [];
+    return stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+  }
+
+  const pids = await getPids();
+
+  if (pids.length === 0) {
+    console.log(`[installer] port-fence: port ${port} clear for ${workloadId}`);
+    return;
+  }
+
+  // Kill each PID holding the port.
+  for (const pid of pids) {
+    await run(["kill", pid]);
+    console.log(
+      `[installer] port-fence: killed PID ${pid} holding port ${port} for ${workloadId}`
+    );
+  }
+
+  // Poll until port is free or timeout.
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, pollMs));
+    const remaining = await getPids();
+    if (remaining.length === 0) {
+      console.log(`[installer] port-fence: port ${port} clear for ${workloadId}`);
+      return;
+    }
+  }
+
+  // Final check after timeout.
+  const still = await getPids();
+  if (still.length > 0) {
+    throw new Error(
+      `port ${port} still held by PID(s) ${still.join(", ")} after fence timeout — manual cleanup required`
+    );
+  }
+}
+
 /**
  * Fully install a workload: fetch → extract → verify → render template
  * → write plist → bootstrap. Returns the install record.
@@ -634,6 +705,19 @@ export async function installWorkload(
     writeFileSync(tmpPlist, renderedPlist, { mode: 0o644 });
     const { renameSync } = await import("node:fs");
     renameSync(tmpPlist, plistPath);
+
+    // 8.5. Port-fence: if the workload declares a port via env, ensure
+    //      it's free before swapping supervisors. Detached children from
+    //      the old process may hold the port after bootout.
+    const portKey = Object.keys(env).find(
+      (k) => k.toUpperCase() === "PORT" || k.toUpperCase().endsWith("_PORT")
+    );
+    if (portKey) {
+      const portVal = Number(env[portKey]);
+      if (!Number.isNaN(portVal) && portVal > 0) {
+        await fencePort(portVal, declaration.id);
+      }
+    }
 
     // 9. Unload first to make this idempotent for same-version reloads,
     //    then bootstrap.
