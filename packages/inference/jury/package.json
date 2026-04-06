@@ -8,8 +8,8 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@seed/inference-utils": "file:../utils",
-    "@seed/sensitivity": "file:../sensitivity"
+    "@seed/inference-utils": "workspace:*",
+    "@seed/sensitivity": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "latest"
