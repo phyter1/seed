@@ -40,6 +40,14 @@ Map `$ARGUMENTS` to a `seed fleet <subcommand>` invocation:
 | `configure` | `seed fleet configure [--control-url <url>] [--operator-token <token>]` |
 | `version` | `seed version` |
 | `join <url>` | `seed fleet join <url> [--machine-id <id>] [--display-name <name>]` |
+| `upgrade-cp` | `seed fleet upgrade-cp --machine <id> [--version <tag>] [--label <label>] [--force]` |
+| `release` | `seed fleet release --version <tag> --control-plane-machine <id> [--skip-control-plane] [--dry-run] [--parallel N] [--cp-label <label>] [--cp-force]` |
+| `workload install` | `seed fleet workload install <id> --machine <id>` |
+| `workload reload` | `seed fleet workload reload <id> --machine <id>` |
+| `workload remove` | `seed fleet workload remove <id> --machine <id>` |
+| `workload status` | `seed fleet workload status [<id>] --machine <id>` |
+| `workload gc` | `seed fleet workload gc --machine <id> [--workload <id>] [--keep-prior N] [--include-tmp] [--dry-run]` |
+| `workload declare` | `seed fleet workload declare <id> --machine <id> --version <ver> --artifact-url <url> [--env K=V ...]` |
 
 If `$ARGUMENTS` is empty, default to `status`.
 
@@ -83,7 +91,7 @@ seed fleet self-update --version v0.4.4   # specific tag
 
 ## Notes
 
-- The CLI and agents upgrade together via `seed fleet upgrade`. The control plane daemon (on the control-plane host) currently needs a separate self-update — there is no `seed fleet release` yet that orchestrates all three tiers.
+- `seed fleet release --version <tag> --control-plane-machine <id>` orchestrates all three tiers: control plane → agents → CLIs. Use `--skip-control-plane` if you only want agent + CLI updates.
 - `seed fleet upgrade` skips machines whose agent is already at target. Known bug: this also skips the CLI update for those machines. Use a direct curl to the `/v1/fleet/:id/command` endpoint with `action: "cli.update"` if you need to force-refresh a stale CLI on an up-to-date agent.
 - `audit` is the source of truth for command outcomes — HTTP dispatch is fire-and-forget; command results land in the audit log via the agent's WebSocket response.
 - Binary distribution is pull-from-GitHub only. Never use scp or ssh to push Seed binaries to fleet machines as part of normal operation.
