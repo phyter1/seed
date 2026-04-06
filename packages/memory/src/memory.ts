@@ -38,6 +38,7 @@ export interface BackfillResult {
   embedded: number;
   skipped: Record<InsertEmbeddingSkipReason, number>;
   total: number;
+  alreadyRunning?: boolean;
 }
 
 export interface MemoryServiceOptions {
@@ -66,6 +67,7 @@ export class MemoryService {
   private readonly embedder: EmbedClient;
   private readonly llm: LLMClient;
   private readonly dedupThreshold: number;
+  private _backfillRunning = false;
 
   constructor(opts: MemoryServiceOptions) {
     this.db = opts.db;
@@ -482,6 +484,18 @@ export class MemoryService {
   // --- Backfill -------------------------------------------------------
 
   async backfillEmbeddings(): Promise<BackfillResult> {
+    if (this._backfillRunning) {
+      return { embedded: 0, skipped: emptySkipCounts(), total: 0, alreadyRunning: true };
+    }
+    this._backfillRunning = true;
+    try {
+      return await this._backfillEmbeddingsInner();
+    } finally {
+      this._backfillRunning = false;
+    }
+  }
+
+  private async _backfillEmbeddingsInner(): Promise<BackfillResult> {
     const skipped = emptySkipCounts();
     let embedded = 0;
     const record = (result: { ok: boolean; reason?: InsertEmbeddingSkipReason }) => {
@@ -503,12 +517,6 @@ export class MemoryService {
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i]!;
           const emb = await this.embedder.embed(chunk);
-          // Persist the chunk row first (no embedding), then attempt
-          // the vec insert separately. This decouples the memories
-          // INSERT from the vec_memories INSERT so that a vec failure
-          // does NOT roll back the chunk row — the chunk stays and
-          // becomes eligible for re-embed on the next backfill run,
-          // while the failure reason is logged for investigation.
           const mid = this.db.storeMemory({
             raw_text: chunk,
             summary: `[Chunk ${i + 1}/${chunks.length}] ${row.summary.slice(0, 100)}`,
@@ -534,16 +542,6 @@ export class MemoryService {
       }
     }
 
-    // Also embed stranded chunk rows (parent_id IS NOT NULL) that
-    // were created by an earlier version without committing to
-    // vec_memories. Uses the same single-chunk embedding text
-    // pattern as the parent path above.
-    //
-    // All vec_memories INSERTs flow through safeInsertEmbedding which
-    // classifies failures (pk_conflict, dim_mismatch, zero_length,
-    // nan_or_inf, other) and logs non-pk_conflict skips at warn, so
-    // the shape of failures in production is observable instead of
-    // swallowed by a bare catch.
     const chunkRows = this.db.chunksMissingEmbeddings();
     for (const row of chunkRows) {
       if (this.db.hasEmbedding(row.id)) continue;
