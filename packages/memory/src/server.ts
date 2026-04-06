@@ -181,6 +181,9 @@ export function createMemoryApp(deps: MemoryServerDeps): Hono {
   // POST /backfill
   app.post("/backfill", async (c) => {
     const result = await service.backfillEmbeddings();
+    if (result.alreadyRunning) {
+      return c.json({ status: "already_running" }, 409);
+    }
     return c.json({
       status: "done",
       backfilled: result.embedded, // kept for backward compat
