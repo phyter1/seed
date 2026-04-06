@@ -1,11 +1,13 @@
 ---
 name: fleet-status
 description: Check the health of all machines, services, and models across the fleet.
+category: identity
+invocable: false
 argument-hint: [machine-name | "all"]
-allowed-tools: Bash, Read
+capabilities:
+  - shell
+  - read-files
 ---
-
-<!-- Rendered from packages/skills/fleet-status/skill.md — edit the source, not this file -->
 
 # Fleet Status
 

@@ -4,5 +4,8 @@
   "workspaces": [
     "packages/*",
     "packages/*/*"
-  ]
+  ],
+  "scripts": {
+    "render-skills": "bun run packages/skills/render.ts"
+  }
 }

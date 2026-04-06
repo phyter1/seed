@@ -7,7 +7,7 @@
     },
     "packages/fleet/control": {
       "name": "@seed/fleet-control",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "dependencies": {
         "hono": "^4.7.0",
       },
@@ -30,8 +30,8 @@
       "name": "@seed/jury",
       "version": "0.2.0",
       "dependencies": {
-        "@seed/inference-utils": "file:../utils",
-        "@seed/sensitivity": "file:../sensitivity",
+        "@seed/inference-utils": "workspace:*",
+        "@seed/sensitivity": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "latest",
@@ -52,9 +52,9 @@
       "name": "@seed/router",
       "version": "1.3.0",
       "dependencies": {
-        "@seed/inference-utils": "file:../utils",
-        "@seed/jury": "file:../jury",
-        "@seed/sensitivity": "file:../sensitivity",
+        "@seed/inference-utils": "workspace:*",
+        "@seed/jury": "workspace:*",
+        "@seed/sensitivity": "workspace:*",
         "typescript": "^5.7.0",
       },
       "devDependencies": {
@@ -153,13 +153,5 @@
     "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
 
     "undici-types": ["undici-types@7.18.2", "", {}, "sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w=="],
-
-    "@seed/jury/@seed/inference-utils": ["@seed/inference-utils@file:packages/inference/utils", { "devDependencies": { "@types/bun": "latest" } }],
-
-    "@seed/jury/@seed/sensitivity": ["@seed/sensitivity@file:packages/inference/sensitivity", { "devDependencies": { "@types/bun": "latest" } }],
-
-    "@seed/router/@seed/inference-utils": ["@seed/inference-utils@file:packages/inference/utils", { "devDependencies": { "@types/bun": "latest" } }],
-
-    "@seed/router/@seed/sensitivity": ["@seed/sensitivity@file:packages/inference/sensitivity", { "devDependencies": { "@types/bun": "latest" } }],
   }
 }
