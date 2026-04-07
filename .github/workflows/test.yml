@@ -24,6 +24,8 @@ jobs:
           - packages/fleet/control
           - packages/memory
           - packages/inference/router
+          - packages/providers
+          - packages/hosts
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

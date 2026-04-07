@@ -4,10 +4,14 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "test": "bun test",
     "discover": "bun run src/discover.ts",
     "run-headless": "bun run src/run-headless.ts"
   },
   "dependencies": {
     "typescript": "^5.7.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
   }
 }
