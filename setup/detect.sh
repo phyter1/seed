@@ -251,6 +251,38 @@ echo ""
 echo "Detection complete. Machine detection saved to seed.machine.json"
 echo ""
 
+# --- Bootstrap seed.config.json if it doesn't exist ---
+USER_CONFIG="$SEED_DIR/seed.config.json"
+if [ ! -f "$USER_CONFIG" ] && [ "$DEFAULT_HOST" != "none" ]; then
+  echo "Generating starter config at seed.config.json..."
+  python3 -c "
+import json
+config = {
+    'host': {
+        'default': '$DEFAULT_HOST',
+        'heartbeat': '$DEFAULT_HOST',
+        'installed': {
+            'claude': $( [ "$HAS_CLAUDE" = true ] && echo "true" || echo "false" ),
+            'codex': $( [ "$HAS_CODEX" = true ] && echo "true" || echo "false" ),
+            'gemini': $( [ "$HAS_GEMINI" = true ] && echo "true" || echo "false" ),
+        },
+    },
+    'heartbeat': {
+        'host': '$DEFAULT_HOST',
+    },
+    'providers': {},
+    'models': [],
+    'routing': {
+        'prefer_local': True,
+    },
+}
+print(json.dumps(config, indent=2))
+" > "$USER_CONFIG"
+  echo "  Starter config written with $DEFAULT_HOST as default host."
+  echo "  Edit seed.config.json to add providers, models, and routing."
+  echo ""
+fi
+
 # --- Report what needs to be installed ---
 MISSING=""
 [ "$HAS_GIT" = false ] && MISSING="$MISSING git"

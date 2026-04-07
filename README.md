@@ -34,9 +34,8 @@ cd seed
 # Detect your hardware, tools, and host runtimes
 bash setup/detect.sh
 
-# Start your first conversation
-# Today the Claude adapter is the primary path:
-claude
+# Start your first conversation with your detected host runtime.
+# detect.sh will tell you which command to run (claude, codex, or gemini).
 ```
 
 `detect.sh` probes your hardware (CPU, RAM, GPU), checks for installed tools and host runtimes (Claude, Codex, Gemini), scans for model runtimes (MLX, Ollama), discovers other Seed machines on your network, and writes a `seed.machine.json`.
@@ -50,7 +49,7 @@ If you want to pin hosts, providers, and model inventory explicitly, copy `seed.
 ## How it works
 
 ### Day 1
-You open a supported host runtime in the Seed directory. Today that path is best supported through Claude Code. The host adapter reads the boot contract, sees there is no identity yet, and starts a conversation. You talk. At the end, it writes its first `self.md` and journal entry. A relationship has begun.
+You open a supported host runtime in the Seed directory. The host adapter reads the boot contract, sees there is no identity yet, and starts a conversation. You talk. At the end, it writes its first `self.md` and journal entry. A relationship has begun.
 
 ### Day 7
 The AI remembers your previous conversations. It has opinions. It pushes back when it disagrees. It's working on projects with you. The journal has a week of entries, and the AI can trace its own evolution.
