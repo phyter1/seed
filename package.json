@@ -7,6 +7,7 @@
   ],
   "scripts": {
     "render-skills": "bun run packages/skills/render.ts",
-    "render-claude": "bun run packages/core/render-claude.ts"
+    "render-claude": "bun run packages/core/render-claude.ts",
+    "test": "bun test --recursive"
   }
 }

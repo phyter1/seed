@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc",
     "start": "bun run src/router.ts",
-    "router": "bun run src/router.ts"
+    "router": "bun run src/router.ts",
+    "test": "bun test"
   },
   "dependencies": {
     "@seed/core": "workspace:*",

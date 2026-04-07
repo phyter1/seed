@@ -2,13 +2,13 @@
 
 ## Status
 
-**Mostly done** — CI drift validation (PR #67), adapter smoke tests (PR #74), and path validation (PR #75) completed in session 10. Minor remaining work.
+**Done** — CI drift validation (PR #67), adapter smoke tests (PR #74), path validation (PR #75), and missing test scripts added. All deliverables complete.
 
 ### Dependency updates
 - ~~Depends on EPIC-006~~ — satisfied (EPIC-006 completed with decision #21)
 - ~~Depends on EPIC-007~~ — satisfied (EPIC-007 completed session 10, PR #67)
-- Depends on EPIC-008 — still active (EPIC-008 is Partial)
-- Depends on EPIC-009 — still active (EPIC-009 is Mostly done)
+- ~~Depends on EPIC-008~~ — satisfied (PR #80)
+- ~~Depends on EPIC-009~~ — satisfied (completed concurrently)
 
 ## Goal
 
