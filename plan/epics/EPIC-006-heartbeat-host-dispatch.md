@@ -39,3 +39,7 @@ Current heartbeat is hard-coupled to `claude -p` and Anthropic model naming. Tha
 
 - EPIC-008
 - EPIC-010
+
+## Notes
+
+- **Design Decision #21:** Existential's heartbeat (`heartbeat.sh`, `pulse.sh` on ren1) remains the operational system. This EPIC builds the *future* host-neutral replacement inside seed. The two systems coexist until this EPIC reaches feature parity with existential's proven two-tier cadence. No migration until seed's heartbeat can do everything existential's does.
