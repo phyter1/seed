@@ -1,5 +1,14 @@
 # EPIC-001: Canonical Filesystem Contract
 
+## Status
+
+**Done** — Completed in session 10 (PR #68).
+
+### Dependency updates
+- ~~Blocks EPIC-002~~ — satisfied (EPIC-002 completed session 10, PR #73)
+- ~~Blocks EPIC-006~~ — satisfied (EPIC-006 completed with decision #21)
+- Blocks EPIC-009 — partially satisfied (EPIC-009 is Mostly done)
+
 ## Goal
 
 Make the public filesystem contract match the real repo. Seed should have one authoritative identity/memory layout, not competing root-level and package-level schemes.
