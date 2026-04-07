@@ -84,6 +84,10 @@ cat "$DIST_DIR/checksums.txt"
 # Copy launchd template alongside the binaries
 cp "$PKG_DIR/com.seed.memory.plist.template" "$DIST_DIR/"
 
+# sqlite-vec ships platform-specific native extensions. `bun install` only
+# installs the host platform's package. For cross-platform builds, install
+# foreign platform packages first — see packages/memory/README.md.
+#
 # Copy sqlite-vec native extensions. Bun-compiled binaries cannot load
 # .dylib/.so files from the virtual bunfs, so they must live on disk
 # next to the binary and be pointed at via SEED_VEC_PATH.
