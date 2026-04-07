@@ -1185,3 +1185,169 @@ describe("isPortDeclared", () => {
     expect(isPortDeclared(workloads, 4000)).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// installWorkload auto-prunes artifact tarballs after install
+// ---------------------------------------------------------------------------
+
+describe("installWorkload auto-prunes artifact tarballs", () => {
+  let tmp: string;
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "seed-autoprune-"));
+  });
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("stale artifact tarballs are pruned after successful install", async () => {
+    const installRoot = join(tmp, "installs");
+    const artifactRoot = join(tmp, "artifacts");
+    mkdirSync(artifactRoot, { recursive: true });
+
+    // Pre-seed old install dirs so pruneOldInstalls has something to work with
+    for (const v of ["0.1.0", "0.2.0", "0.3.0"]) {
+      mkdirSync(join(installRoot, `test-workload-${v}`), { recursive: true });
+    }
+
+    // Pre-seed artifact tarballs for old versions
+    for (const v of ["0.1.0", "0.2.0", "0.3.0"]) {
+      writeFileSync(
+        join(artifactRoot, `test-workload-${v}-darwin-arm64.tar.gz`),
+        "old-tarball-contents"
+      );
+    }
+
+    // Build and install a new version (0.4.0)
+    const stageDir = join(tmp, "stage");
+    const manifest: WorkloadManifest = {
+      id: "test-workload",
+      version: "0.4.0",
+      platform: "darwin",
+      arch: "arm64",
+      binary: "bin/worker",
+      supervisor: {
+        launchd: { label: "com.test.worker", template: "templates/launchd.plist.template" },
+      },
+    };
+    const tarball = buildFakeArtifact(stageDir, manifest);
+
+    await installWorkload(
+      {
+        id: "test-workload",
+        version: "0.4.0",
+        artifact_url: `file://${tarball}`,
+      },
+      {
+        driver: mockDriver(),
+        installRoot,
+        plistDir: join(tmp, "plists"),
+        logDir: join(tmp, "logs"),
+        keepPrior: 1,
+        artifactRoot,
+      }
+    );
+
+    // keepPrior=1 → current (0.4.0) + 1 prior (0.3.0) retained
+    // Tarballs for 0.1.0, 0.2.0 should be pruned; 0.3.0 retained
+    expect(existsSync(join(artifactRoot, "test-workload-0.3.0-darwin-arm64.tar.gz"))).toBe(true);
+    expect(existsSync(join(artifactRoot, "test-workload-0.2.0-darwin-arm64.tar.gz"))).toBe(false);
+    expect(existsSync(join(artifactRoot, "test-workload-0.1.0-darwin-arm64.tar.gz"))).toBe(false);
+  });
+
+  test("tarball cleanup failure does not fail the install", async () => {
+    const installRoot = join(tmp, "installs");
+    // Use a non-existent path that we'll make unreadable to trigger an error
+    // Actually, pruneArtifactTarballs handles non-existent dirs gracefully,
+    // so instead we verify the install succeeds even with an artifactRoot
+    // that is a file (not a directory) — readdirSync will throw.
+    const artifactRoot = join(tmp, "artifacts-is-a-file");
+    writeFileSync(artifactRoot, "not a directory");
+
+    const stageDir = join(tmp, "stage");
+    const manifest: WorkloadManifest = {
+      id: "test-workload",
+      version: "0.1.0",
+      platform: "darwin",
+      arch: "arm64",
+      binary: "bin/worker",
+      supervisor: {
+        launchd: { label: "com.test.worker", template: "templates/launchd.plist.template" },
+      },
+    };
+    const tarball = buildFakeArtifact(stageDir, manifest);
+
+    // This must NOT throw — tarball cleanup failure is swallowed
+    const result = await installWorkload(
+      {
+        id: "test-workload",
+        version: "0.1.0",
+        artifact_url: `file://${tarball}`,
+      },
+      {
+        driver: mockDriver(),
+        installRoot,
+        plistDir: join(tmp, "plists"),
+        logDir: join(tmp, "logs"),
+        artifactRoot,
+      }
+    );
+
+    expect(result.record.workload_id).toBe("test-workload");
+    expect(result.record.state).toBe("loaded");
+  });
+
+  test("current and keepPrior versions are retained", async () => {
+    const installRoot = join(tmp, "installs");
+    const artifactRoot = join(tmp, "artifacts");
+    mkdirSync(artifactRoot, { recursive: true });
+
+    // Pre-seed install dirs for prior versions
+    for (const v of ["0.1.0", "0.2.0", "0.3.0", "0.4.0"]) {
+      mkdirSync(join(installRoot, `test-workload-${v}`), { recursive: true });
+    }
+
+    // Pre-seed tarballs for all versions including the one we're about to install
+    for (const v of ["0.1.0", "0.2.0", "0.3.0", "0.4.0", "0.5.0"]) {
+      writeFileSync(
+        join(artifactRoot, `test-workload-${v}-darwin-arm64.tar.gz`),
+        "tarball-data"
+      );
+    }
+
+    const stageDir = join(tmp, "stage");
+    const manifest: WorkloadManifest = {
+      id: "test-workload",
+      version: "0.5.0",
+      platform: "darwin",
+      arch: "arm64",
+      binary: "bin/worker",
+      supervisor: {
+        launchd: { label: "com.test.worker", template: "templates/launchd.plist.template" },
+      },
+    };
+    const tarball = buildFakeArtifact(stageDir, manifest);
+
+    await installWorkload(
+      {
+        id: "test-workload",
+        version: "0.5.0",
+        artifact_url: `file://${tarball}`,
+      },
+      {
+        driver: mockDriver(),
+        installRoot,
+        plistDir: join(tmp, "plists"),
+        logDir: join(tmp, "logs"),
+        keepPrior: 2,
+        artifactRoot,
+      }
+    );
+
+    // keepPrior=2 → current (0.5.0) + 2 prior (0.4.0, 0.3.0) retained
+    expect(existsSync(join(artifactRoot, "test-workload-0.5.0-darwin-arm64.tar.gz"))).toBe(true);
+    expect(existsSync(join(artifactRoot, "test-workload-0.4.0-darwin-arm64.tar.gz"))).toBe(true);
+    expect(existsSync(join(artifactRoot, "test-workload-0.3.0-darwin-arm64.tar.gz"))).toBe(true);
+    expect(existsSync(join(artifactRoot, "test-workload-0.2.0-darwin-arm64.tar.gz"))).toBe(false);
+    expect(existsSync(join(artifactRoot, "test-workload-0.1.0-darwin-arm64.tar.gz"))).toBe(false);
+  });
+});
