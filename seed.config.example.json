@@ -1,16 +1,18 @@
 {
   "host": {
-    "default": "claude",
-    "heartbeat": "claude",
+    "_note": "Set 'default' and 'heartbeat' to 'claude', 'codex', or 'gemini' based on your preferred host runtime. detect.sh will auto-generate this for you.",
+    "default": null,
+    "heartbeat": null,
     "installed": {
-      "claude": true,
-      "codex": true,
+      "claude": false,
+      "codex": false,
       "gemini": false
     }
   },
   "heartbeat": {
-    "host": "claude",
-    "model": "claude-sonnet-4-6"
+    "_note": "Host runtime and model for the autonomous heartbeat. Must match a host in 'host.installed'.",
+    "host": null,
+    "model": null
   },
   "providers": {
     "mlx_local": {
