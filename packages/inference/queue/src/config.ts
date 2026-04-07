@@ -1,23 +1,7 @@
 import { existsSync, readFileSync } from "fs";
-import { resolve } from "path";
 import type { Capability, Locality } from "./types";
-
-interface SeedProviderConfig {
-  type: string;
-  base_url?: string;
-  locality?: Locality;
-}
-
-interface SeedModelConfig {
-  id: string;
-  provider: string;
-  tags?: string[];
-}
-
-interface SeedConfigFile {
-  providers?: Record<string, SeedProviderConfig>;
-  models?: SeedModelConfig[];
-}
+import type { SeedConfig } from "@seed/core/config";
+import { findConfigPath } from "@seed/core/config";
 
 export interface ResolvedWorkerConfig {
   workerId: string;
@@ -31,19 +15,19 @@ export interface ResolvedWorkerConfig {
   providerId?: string;
 }
 
-function loadSeedConfig(seedConfigPath: string): SeedConfigFile | null {
+function readSeedConfigFile(seedConfigPath: string): SeedConfig | null {
   if (!existsSync(seedConfigPath)) return null;
-  return JSON.parse(readFileSync(seedConfigPath, "utf-8")) as SeedConfigFile;
+  return JSON.parse(readFileSync(seedConfigPath, "utf-8")) as SeedConfig;
 }
 
-function inferProviderId(config: SeedConfigFile | null, explicitProviderId: string | undefined, defaultModel: string): string | undefined {
+function inferProviderId(config: SeedConfig | null, explicitProviderId: string | undefined, defaultModel: string): string | undefined {
   if (explicitProviderId) return explicitProviderId;
   if (!config?.models?.length || !defaultModel) return undefined;
   return config.models.find((model) => model.id === defaultModel)?.provider;
 }
 
 function inferDefaultModel(
-  config: SeedConfigFile | null,
+  config: SeedConfig | null,
   providerId: string | undefined,
   explicitDefaultModel: string,
   fallbackDefaultModel: string
@@ -54,7 +38,7 @@ function inferDefaultModel(
 }
 
 function inferInferenceUrl(
-  config: SeedConfigFile | null,
+  config: SeedConfig | null,
   providerId: string | undefined,
   explicitUrl: string,
   fallbackUrl: string
@@ -64,7 +48,7 @@ function inferInferenceUrl(
   return config.providers[providerId]?.base_url ?? fallbackUrl;
 }
 
-function inferLocality(config: SeedConfigFile | null, providerId: string | undefined, explicit: string | undefined, inferenceUrl: string): Locality {
+function inferLocality(config: SeedConfig | null, providerId: string | undefined, explicit: string | undefined, inferenceUrl: string): Locality {
   if (explicit === "local" || explicit === "cloud") return explicit;
   if (config?.providers && providerId) {
     const fromConfig = config.providers[providerId]?.locality;
@@ -85,8 +69,8 @@ function inferLocality(config: SeedConfigFile | null, providerId: string | undef
 }
 
 export function resolveWorkerConfig(env: NodeJS.ProcessEnv): ResolvedWorkerConfig {
-  const seedConfigPath = env.SEED_CONFIG ?? resolve(import.meta.dir, "..", "..", "..", "..", "seed.config.json");
-  const config = loadSeedConfig(seedConfigPath);
+  const seedConfigPath = findConfigPath();
+  const config = seedConfigPath ? readSeedConfigFile(seedConfigPath) : null;
 
   const explicitProviderId = env.PROVIDER_ID ?? env.SEED_PROVIDER;
   const fallbackDefaultModel = env.FALLBACK_DEFAULT_MODEL ?? env.SEED_FALLBACK_DEFAULT_MODEL ?? "";

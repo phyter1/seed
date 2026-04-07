@@ -11,8 +11,9 @@
  *   3. (none — emission disabled)
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import type { SeedConfig } from "@seed/core/config";
+import { findConfigPath } from "@seed/core/config";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -45,12 +46,6 @@ export interface TelemetryEvent {
 
 // ── Config Resolution ──────────────────────────────────────────────────────
 
-interface SeedConfigWithTelemetry {
-  telemetry?: {
-    endpoint?: string;
-  };
-}
-
 /**
  * Resolve the telemetry endpoint from env vars then seed.config.json.
  * Returns null if no endpoint is configured (emission disabled).
@@ -61,15 +56,13 @@ export function resolveTelemetryEndpoint(): string | null {
     return fromEnv.trim();
   }
 
-  const seedConfigPath =
-    process.env.SEED_CONFIG ??
-    resolve(import.meta.dir, "..", "..", "..", "..", "seed.config.json");
+  const seedConfigPath = findConfigPath();
 
-  if (!existsSync(seedConfigPath)) return null;
+  if (!seedConfigPath) return null;
 
   try {
     const raw = readFileSync(seedConfigPath, "utf-8");
-    const config = JSON.parse(raw) as SeedConfigWithTelemetry;
+    const config = JSON.parse(raw) as SeedConfig;
     const endpoint = config.telemetry?.endpoint;
     if (typeof endpoint === "string" && endpoint.trim().length > 0) {
       return endpoint.trim();

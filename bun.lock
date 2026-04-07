@@ -30,6 +30,7 @@
       "name": "@seed/hosts",
       "version": "0.1.0",
       "dependencies": {
+        "@seed/core": "workspace:*",
         "typescript": "^5.7.0",
       },
       "devDependencies": {
@@ -51,6 +52,7 @@
       "name": "@seed/queue",
       "version": "0.1.0",
       "dependencies": {
+        "@seed/core": "workspace:*",
         "bonjour-service": "^1.3.0",
         "hono": "^4.7.0",
       },
@@ -62,6 +64,7 @@
       "name": "@seed/router",
       "version": "1.3.0",
       "dependencies": {
+        "@seed/core": "workspace:*",
         "@seed/inference-utils": "workspace:*",
         "@seed/jury": "workspace:*",
         "@seed/sensitivity": "workspace:*",
