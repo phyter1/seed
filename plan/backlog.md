@@ -33,29 +33,17 @@ The planned order was linear (001 → 002 → 003 → ...), but actual execution
 | 1 | [EPIC-001](./epics/EPIC-001-canonical-filesystem-contract.md) — Canonical Filesystem Contract | **Done** |
 | 2 | [EPIC-002](./epics/EPIC-002-host-neutral-boot-spec.md) — Host-Neutral Boot Spec | **Done** |
 | 3 | [EPIC-003](./epics/EPIC-003-host-adapter-interface.md) — Host Adapter Interface | **Done** |
-| 4 | [EPIC-005](./epics/EPIC-005-runtime-config-model.md) — Runtime Config Model | **Partial** |
+| 4 | [EPIC-005](./epics/EPIC-005-runtime-config-model.md) — Runtime Config Model | **Done** |
 | 5 | [EPIC-006](./epics/EPIC-006-heartbeat-host-dispatch.md) — Heartbeat Host Dispatch | **Done** |
 | 6 | [EPIC-004](./epics/EPIC-004-provider-adapter-interface.md) — Provider Adapter Interface | **Done** |
 | 7 | [EPIC-007](./epics/EPIC-007-host-neutral-skills.md) — Host-Neutral Skills | **Done** |
-| 8 | [EPIC-008](./epics/EPIC-008-setup-and-install-refactor.md) — Setup and Install Refactor | **Partial** |
-| 9 | [EPIC-009](./epics/EPIC-009-documentation-realignment.md) — Documentation Realignment | **Mostly done** |
-| 10 | [EPIC-010](./epics/EPIC-010-repo-quality-and-validation.md) — Repo Quality and Validation | **Mostly done** |
+| 8 | [EPIC-008](./epics/EPIC-008-setup-and-install-refactor.md) — Setup and Install Refactor | **Done** |
+| 9 | [EPIC-009](./epics/EPIC-009-documentation-realignment.md) — Documentation Realignment | **Done** |
+| 10 | [EPIC-010](./epics/EPIC-010-repo-quality-and-validation.md) — Repo Quality and Validation | **Done** |
 
-## Remaining Dependency Graph
+## Dependency Graph
 
-Only 4 EPICs have open work. All hard blockers for the remaining items are resolved.
-
-```
-EPIC-005 (Partial) ──► EPIC-008 (Partial) ──► EPIC-009 (Mostly done)
-                                                       │
-                                                       ▼
-                                               EPIC-010 (Mostly done)
-```
-
-- **EPIC-005** — No remaining blockers. Needs `seed.machine.json` and JSON schema.
-- **EPIC-008** — Depends on EPIC-005 for config model. `seed.config.example.json` defaults "claude"; needs host-neutral treatment.
-- **EPIC-009** — Minor remaining work. Depends on EPIC-008 for setup flow documentation.
-- **EPIC-010** — Minor remaining work. No strict blockers.
+All 10 EPICs are complete. No remaining dependencies.
 
 ## Risks
 

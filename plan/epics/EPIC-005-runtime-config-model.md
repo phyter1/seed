@@ -2,14 +2,14 @@
 
 ## Status
 
-**Partial** — `seed.config.example.json` exists but `seed.machine.json` and JSON schema are not yet implemented.
+**Done** — Canonical types defined in `packages/core/config/types.ts` (PR #78). Shared loader built (PR #78). `detect.sh` split to `seed.machine.json` (PR #78). All consumers migrated (PR #79). A formal JSON schema file was not created, but the TypeScript types serve the same purpose.
 
 ### Dependency updates
 - ~~Depends on EPIC-001~~ — satisfied (EPIC-001 completed session 10, PR #68)
 - ~~Depends on EPIC-002~~ — satisfied (EPIC-002 completed session 10, PR #73)
 - ~~Blocks EPIC-004~~ — satisfied (EPIC-004 completed earlier session; shipped as soft dependency)
 - ~~Blocks EPIC-006~~ — satisfied (EPIC-006 completed with decision #21)
-- Blocks EPIC-008 — still active (EPIC-008 is Partial)
+- ~~Blocks EPIC-008~~ — satisfied (EPIC-008 completed)
 
 ## Goal
 
