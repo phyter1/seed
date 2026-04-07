@@ -1,6 +1,7 @@
 {
   "name": "@seed/hosts",
   "version": "0.1.0",
+  "private": true,
   "type": "module",
   "scripts": {
     "build": "tsc",
@@ -9,10 +10,10 @@
     "run-headless": "bun run src/run-headless.ts"
   },
   "dependencies": {
-    "@seed/core": "workspace:*",
-    "typescript": "^5.7.0"
+    "@seed/core": "workspace:*"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
   }
 }
