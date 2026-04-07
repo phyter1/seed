@@ -2,13 +2,13 @@
 
 ## Status
 
-**Mostly done** — README tree fixed (PR #75), architecture doc completed. Minor remaining work depends on EPIC-008 setup flow documentation.
+**Done** — README updated with key concepts, boot file rendering status, corrected tree labels. Architecture doc updated to accurately describe `packages/skills/`.
 
 ### Dependency updates
 - ~~Depends on EPIC-001~~ — satisfied (EPIC-001 completed session 10, PR #68)
 - ~~Depends on EPIC-002~~ — satisfied (EPIC-002 completed session 10, PR #73)
 - ~~Depends on EPIC-007~~ — satisfied (EPIC-007 completed session 10, PR #67)
-- Depends on EPIC-008 — still active (EPIC-008 is Partial)
+- ~~Depends on EPIC-008~~ — satisfied (PR #80)
 - Blocks EPIC-010 — still active (EPIC-010 is Mostly done)
 
 ## Goal
