@@ -9,7 +9,7 @@
 
 ### 1. Control plane runs on a dedicated always-on machine, not the user's machine
 
-The control plane runs on a machine that's always on (ren1 in our case). The user's machine (ryan-air) is a *client* — it can observe, configure, and override, but it doesn't run services and doesn't need to be online.
+The control plane runs on one always-on machine (ren2 — see decision #16). The user's machine (ryan-air) is a *client* — it can observe, configure, and override, but it doesn't run services and doesn't need to be online.
 
 Fleet machines connect outbound to the control plane. The user's CLI connects to the same endpoint.
 

@@ -1,6 +1,7 @@
 # Workloads — Design
 
-**Status:** Design (unimplemented)
+**Status:** Implemented (Phase 1 complete, Phase 2 partial)
+**Implementation notes:** Phase 1 (single-machine install, launchd driver, convergence loop, workload.install command) is complete and deployed. Phase 2 (GitHub Releases artifact distribution, checksum verification) is partially implemented. Phases 3-6 remain as future work.
 **Date:** 2026-04-04
 **Author:** Ren (interactive session with Ryan)
 **Prompted by:** ren3 rebooted, `com.ren-jury.router` + `com.ren-jury.mlx-server` weren't seed-managed, so nothing brought them back. Seed claims to own ren3 but doesn't own the services that give ren3 its purpose.
