@@ -31,10 +31,10 @@
       "version": "0.1.0",
       "dependencies": {
         "@seed/core": "workspace:*",
-        "typescript": "^5.7.0",
       },
       "devDependencies": {
         "@types/bun": "latest",
+        "typescript": "^5.7.0",
       },
     },
     "packages/inference/jury": {
@@ -68,10 +68,10 @@
         "@seed/inference-utils": "workspace:*",
         "@seed/jury": "workspace:*",
         "@seed/sensitivity": "workspace:*",
-        "typescript": "^5.7.0",
       },
       "devDependencies": {
         "@types/bun": "latest",
+        "typescript": "^5.7.0",
       },
     },
     "packages/inference/sensitivity": {
@@ -102,11 +102,9 @@
     "packages/providers": {
       "name": "@seed/providers",
       "version": "0.2.0",
-      "dependencies": {
-        "typescript": "^5.7.0",
-      },
       "devDependencies": {
         "@types/bun": "latest",
+        "typescript": "^5.7.0",
       },
     },
   },

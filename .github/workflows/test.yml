@@ -21,11 +21,16 @@ jobs:
       fail-fast: false
       matrix:
         package:
+          - packages/core
           - packages/fleet/control
-          - packages/memory
-          - packages/inference/router
-          - packages/providers
           - packages/hosts
+          - packages/inference/jury
+          - packages/inference/queue
+          - packages/inference/router
+          - packages/inference/sensitivity
+          - packages/inference/utils
+          - packages/memory
+          - packages/providers
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

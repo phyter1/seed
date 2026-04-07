@@ -1,6 +1,7 @@
 {
   "name": "@seed/memory",
   "version": "0.4.10",
+  "private": true,
   "type": "module",
   "scripts": {
     "server": "bun run src/main.ts",
