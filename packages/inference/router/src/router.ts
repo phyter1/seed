@@ -756,7 +756,7 @@ function sseEvent(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-async function runJuryStreaming(messages: ChatMessage[], writer: WritableStreamDefaultWriter<Uint8Array>, options: { maxTokens?: number } = {}): Promise<void> {
+async function runJuryStreaming(messages: ChatMessage[], writer: WritableStreamDefaultWriter<Uint8Array>, options: { maxTokens?: number; sensitivity?: string } = {}): Promise<void> {
   const encoder = new TextEncoder();
   const write = (event: string, data: unknown) => writer.write(encoder.encode(sseEvent(event, data)));
   const start = Date.now();
@@ -834,6 +834,7 @@ async function runJuryStreaming(messages: ChatMessage[], writer: WritableStreamD
       jurors: buildJurorAssignments(tasks),
       aggregator: streamingAggregator,
       maxTokens,
+      sensitivity: options.sensitivity as "SENSITIVE" | "GENERAL" | "FRONTIER" | undefined,
       queue: (id, task) => withMachineQueue(taskById.get(id)!.entry.machine, task),
       onJurorComplete: (result) => {
         const task = taskById.get(result.id);
@@ -994,11 +995,25 @@ const server = Bun.serve({
       const lastMessage = messages[messages.length - 1].content;
       console.log(`[jury] "${lastMessage.slice(0, 60)}..." -> ${JURY_MODELS.length} jurors + aggregator (stream=${stream}, sensitivity=${jurySensitivity.level})`);
 
+      // Sensitivity guard: block jury dispatch if content is sensitive and no local jurors exist
+      if (jurySensitivity.local_only) {
+        const localJurors = JURY_MODELS.filter(m => m.locality !== "cloud");
+        if (localJurors.length === 0) {
+          return Response.json({
+            error: {
+              message: "Content classified as SENSITIVE but no local model available. Add a local model to the fleet to handle sensitive requests.",
+              type: "sensitivity_block",
+              code: "no_local_model",
+            },
+          }, { status: 451 });
+        }
+      }
+
       if (stream) {
         const { readable, writable } = new TransformStream<Uint8Array>();
         const writer = writable.getWriter();
 
-        runJuryStreaming(messages, writer, { maxTokens }).catch(async (err) => {
+        runJuryStreaming(messages, writer, { maxTokens, sensitivity: jurySensitivity.level }).catch(async (err) => {
           const encoder = new TextEncoder();
           await writer.write(encoder.encode(sseEvent("error", { error: String(err) })));
           await writer.close();
@@ -1054,6 +1069,21 @@ const server = Bun.serve({
       if (body.mode === "jury") {
         const lastMessage = messages[messages.length - 1]?.content ?? "";
         console.log(`[jury] "${lastMessage.slice(0, 60)}..." (via mode=jury, sensitivity=${sensitivity.level})`);
+
+        // Sensitivity guard: block jury dispatch if content is sensitive and no local jurors exist
+        if (sensitivity.local_only) {
+          const localJurors = JURY_MODELS.filter(m => m.locality !== "cloud");
+          if (localJurors.length === 0) {
+            return Response.json({
+              error: {
+                message: "Content classified as SENSITIVE but no local model available. Add a local model to the fleet to handle sensitive requests.",
+                type: "sensitivity_block",
+                code: "no_local_model",
+              },
+            }, { status: 451 });
+          }
+        }
+
         try {
           const result = await runJury(messages, { maxTokens: body.max_tokens ?? 256, sensitivity: sensitivity.level });
           console.log(`[jury] done [${result.totalMs}ms, agreement=${result.agreement}]`);
@@ -1085,6 +1115,14 @@ const server = Bun.serve({
         if (localEntry) {
           entry = localEntry;
           reason = `sensitivity:${sensitivity.level} (rerouted from cloud)`;
+        } else {
+          return Response.json({
+            error: {
+              message: "Content classified as SENSITIVE but no local model available. Add a local model to the fleet to handle sensitive requests.",
+              type: "sensitivity_block",
+              code: "no_local_model",
+            },
+          }, { status: 451 });
         }
       }
 
