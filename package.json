@@ -6,6 +6,7 @@
     "packages/*/*"
   ],
   "scripts": {
-    "render-skills": "bun run packages/skills/render.ts"
+    "render-skills": "bun run packages/skills/render.ts",
+    "render-claude": "bun run packages/core/render-claude.ts"
   }
 }
