@@ -72,9 +72,19 @@ jobs:
       - name: Render skills
         run: bun run render-skills
 
-      - name: Check for drift
+      - name: Check for skills drift
         run: |
           if ! git diff --exit-code .claude/skills/; then
             echo "::error::Skill adapters are out of sync with sources. Run 'bun run render-skills' and commit the result."
+            exit 1
+          fi
+
+      - name: Render CLAUDE.md
+        run: bun run render-claude
+
+      - name: Check for CLAUDE.md drift
+        run: |
+          if ! git diff --exit-code CLAUDE.md; then
+            echo "::error::CLAUDE.md is out of sync with BOOT.md. Run 'bun run render-claude' and commit the result."
             exit 1
           fi
