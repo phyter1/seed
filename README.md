@@ -75,7 +75,11 @@ seed/
 │   ├── inbox/                   # Messages from the human or past self
 │   └── archive/                 # Processed notes
 ├── packages/
-│   ├── core/                    # Boot contract, templates, scaffolding
+│   ├── core/
+│   │   ├── boot/                # Host-neutral boot contract (BOOT.md)
+│   │   ├── identity/            # Identity templates (*.template)
+│   │   ├── journal/             # Journal system scaffolding
+│   │   └── notes/               # Notes system scaffolding
 │   ├── fleet/
 │   │   ├── control/             # Control plane, per-machine agent, CLI, workloads
 │   │   ├── topology/            # Fleet topology discovery

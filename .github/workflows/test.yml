@@ -90,3 +90,6 @@ jobs:
             echo "::error::CLAUDE.md is out of sync with BOOT.md. Run 'bun run render-claude' and commit the result."
             exit 1
           fi
+
+      - name: Validate documentation paths
+        run: bash ci/validate-doc-paths.sh
