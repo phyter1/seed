@@ -1,5 +1,16 @@
 # EPIC-009: Documentation Realignment
 
+## Status
+
+**Mostly done** — README tree fixed (PR #75), architecture doc completed. Minor remaining work depends on EPIC-008 setup flow documentation.
+
+### Dependency updates
+- ~~Depends on EPIC-001~~ — satisfied (EPIC-001 completed session 10, PR #68)
+- ~~Depends on EPIC-002~~ — satisfied (EPIC-002 completed session 10, PR #73)
+- ~~Depends on EPIC-007~~ — satisfied (EPIC-007 completed session 10, PR #67)
+- Depends on EPIC-008 — still active (EPIC-008 is Partial)
+- Blocks EPIC-010 — still active (EPIC-010 is Mostly done)
+
 ## Goal
 
 Rewrite public docs so they describe the actual architecture and the new host/provider split.

@@ -1,5 +1,7 @@
 # Seed Refactor Backlog
 
+> Last updated: 2026-04-07
+
 ## Objective
 
 Refactor Seed into a host-agnostic runtime that can operate through Claude Code, Codex CLI, Gemini CLI, or future hosts while routing work across any configured local or cloud model providers.
@@ -24,22 +26,42 @@ The first meaningful milestone is:
 
 ## Execution Order
 
-1. [EPIC-001](./epics/EPIC-001-canonical-filesystem-contract.md) — Canonical Filesystem Contract
-2. [EPIC-002](./epics/EPIC-002-host-neutral-boot-spec.md) — Host-Neutral Boot Spec
-3. [EPIC-003](./epics/EPIC-003-host-adapter-interface.md) — Host Adapter Interface
-4. [EPIC-005](./epics/EPIC-005-runtime-config-model.md) — Runtime Config Model
-5. [EPIC-006](./epics/EPIC-006-heartbeat-host-dispatch.md) — Heartbeat Host Dispatch
-6. [EPIC-004](./epics/EPIC-004-provider-adapter-interface.md) — Provider Adapter Interface
-7. [EPIC-007](./epics/EPIC-007-host-neutral-skills.md) — Host-Neutral Skills
-8. [EPIC-008](./epics/EPIC-008-setup-and-install-refactor.md) — Setup and Install Refactor
-9. [EPIC-009](./epics/EPIC-009-documentation-realignment.md) — Documentation Realignment
-10. [EPIC-010](./epics/EPIC-010-repo-quality-and-validation.md) — Repo Quality and Validation
+The planned order was linear (001 → 002 → 003 → ...), but actual execution was opportunistic. EPICs 003, 004, and 006 shipped before 001 was formally closed, and several EPICs completed with soft dependencies still partial. The dependency graph turned out to be less strict than originally modeled.
+
+| # | EPIC | Status |
+|---|------|--------|
+| 1 | [EPIC-001](./epics/EPIC-001-canonical-filesystem-contract.md) — Canonical Filesystem Contract | **Done** |
+| 2 | [EPIC-002](./epics/EPIC-002-host-neutral-boot-spec.md) — Host-Neutral Boot Spec | **Done** |
+| 3 | [EPIC-003](./epics/EPIC-003-host-adapter-interface.md) — Host Adapter Interface | **Done** |
+| 4 | [EPIC-005](./epics/EPIC-005-runtime-config-model.md) — Runtime Config Model | **Partial** |
+| 5 | [EPIC-006](./epics/EPIC-006-heartbeat-host-dispatch.md) — Heartbeat Host Dispatch | **Done** |
+| 6 | [EPIC-004](./epics/EPIC-004-provider-adapter-interface.md) — Provider Adapter Interface | **Done** |
+| 7 | [EPIC-007](./epics/EPIC-007-host-neutral-skills.md) — Host-Neutral Skills | **Done** |
+| 8 | [EPIC-008](./epics/EPIC-008-setup-and-install-refactor.md) — Setup and Install Refactor | **Partial** |
+| 9 | [EPIC-009](./epics/EPIC-009-documentation-realignment.md) — Documentation Realignment | **Mostly done** |
+| 10 | [EPIC-010](./epics/EPIC-010-repo-quality-and-validation.md) — Repo Quality and Validation | **Mostly done** |
+
+## Remaining Dependency Graph
+
+Only 4 EPICs have open work. All hard blockers for the remaining items are resolved.
+
+```
+EPIC-005 (Partial) ──► EPIC-008 (Partial) ──► EPIC-009 (Mostly done)
+                                                       │
+                                                       ▼
+                                               EPIC-010 (Mostly done)
+```
+
+- **EPIC-005** — No remaining blockers. Needs `seed.machine.json` and JSON schema.
+- **EPIC-008** — Depends on EPIC-005 for config model. `seed.config.example.json` defaults "claude"; needs host-neutral treatment.
+- **EPIC-009** — Minor remaining work. Depends on EPIC-008 for setup flow documentation.
+- **EPIC-010** — Minor remaining work. No strict blockers.
 
 ## Risks
 
-- The current repo has a split-brain filesystem contract: docs and boot file describe root-level identity files, while scaffolding lives under `packages/core/`.
-- `.claude/` currently contains most real skill implementation, so adapter extraction will be invasive.
-- Heartbeat is hard-coupled to Claude CLI semantics.
+- ~~The current repo has a split-brain filesystem contract: docs and boot file describe root-level identity files, while scaffolding lives under `packages/core/`.~~ **Resolved** — EPIC-001 (PR #68) canonicalized the filesystem contract.
+- ~~`.claude/` currently contains most real skill implementation, so adapter extraction will be invasive.~~ **Resolved** — EPIC-007 (PR #67) addressed CI drift and skill canonicalization.
+- ~~Heartbeat is hard-coupled to Claude CLI semantics.~~ **Resolved** — EPIC-006 completed with decision #21 (existential stays separate while seed builds its own host-neutral replacement).
 - Codex and Gemini are suitable host adapters, but neither should be treated as a universal provider abstraction.
 
 ## Exit Criteria

@@ -1,5 +1,15 @@
 # EPIC-003: Host Adapter Interface
 
+## Status
+
+**Done** — Completed in an earlier session. Adapter smoke tests added in session 10 (PR #74).
+
+### Dependency updates
+- ~~Depends on EPIC-002~~ — soft dependency (EPIC-003 shipped while EPIC-002 was still partial)
+- ~~Blocks EPIC-006~~ — satisfied (EPIC-006 completed with decision #21)
+- ~~Blocks EPIC-007~~ — satisfied (EPIC-007 completed session 10, PR #67)
+- Blocks EPIC-008 — still active (EPIC-008 is Partial)
+
 ## Goal
 
 Define and implement a stable adapter layer for supported host runtimes.

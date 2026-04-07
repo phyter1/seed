@@ -1,5 +1,16 @@
 # EPIC-005: Runtime Config Model
 
+## Status
+
+**Partial** — `seed.config.example.json` exists but `seed.machine.json` and JSON schema are not yet implemented.
+
+### Dependency updates
+- ~~Depends on EPIC-001~~ — satisfied (EPIC-001 completed session 10, PR #68)
+- ~~Depends on EPIC-002~~ — satisfied (EPIC-002 completed session 10, PR #73)
+- ~~Blocks EPIC-004~~ — satisfied (EPIC-004 completed earlier session; shipped as soft dependency)
+- ~~Blocks EPIC-006~~ — satisfied (EPIC-006 completed with decision #21)
+- Blocks EPIC-008 — still active (EPIC-008 is Partial)
+
 ## Goal
 
 Define a canonical configuration model for hosts, providers, models, routing policy, and heartbeat policy.

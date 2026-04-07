@@ -1,5 +1,17 @@
 # EPIC-008: Setup and Install Refactor
 
+## Status
+
+**Partial** — `seed.config.example.json` defaults to "claude"; needs host-neutral treatment in setup flows.
+
+### Dependency updates
+- ~~Depends on EPIC-003~~ — satisfied (EPIC-003 completed earlier session)
+- ~~Depends on EPIC-004~~ — satisfied (EPIC-004 completed earlier session)
+- Depends on EPIC-005 — still active (EPIC-005 is Partial; config model needed)
+- ~~Depends on EPIC-006~~ — satisfied (EPIC-006 completed with decision #21)
+- Blocks EPIC-009 — still active (EPIC-009 is Mostly done)
+- Blocks EPIC-010 — still active (EPIC-010 is Mostly done)
+
 ## Goal
 
 Refactor setup and install flows to detect and configure hosts and providers independently.

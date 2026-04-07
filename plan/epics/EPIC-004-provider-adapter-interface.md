@@ -1,5 +1,14 @@
 # EPIC-004: Provider Adapter Interface
 
+## Status
+
+**Done** — Completed in an earlier session. Adapter smoke tests added in session 10 (PR #74).
+
+### Dependency updates
+- ~~Depends on EPIC-005~~ — soft dependency (EPIC-004 shipped while EPIC-005 was still partial)
+- ~~Blocks EPIC-007~~ — satisfied (EPIC-007 completed session 10, PR #67)
+- Blocks EPIC-008 — still active (EPIC-008 is Partial)
+
 ## Goal
 
 Make model/provider access explicitly provider-agnostic and independent from host runtime selection.

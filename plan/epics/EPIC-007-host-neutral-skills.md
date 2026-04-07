@@ -1,5 +1,15 @@
 # EPIC-007: Host-Neutral Skills
 
+## Status
+
+**Done** — CI drift validation completed in session 10 (PR #67).
+
+### Dependency updates
+- ~~Depends on EPIC-003~~ — satisfied (EPIC-003 completed earlier session)
+- ~~Depends on EPIC-004~~ — satisfied (EPIC-004 completed earlier session)
+- Blocks EPIC-009 — partially satisfied (EPIC-009 is Mostly done)
+- ~~Blocks EPIC-010~~ — partially satisfied (EPIC-010 is Mostly done)
+
 ## Goal
 
 Make skills canonical in a host-neutral location and render host-specific variants as adapters.

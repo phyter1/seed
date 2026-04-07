@@ -1,5 +1,17 @@
 # EPIC-006: Heartbeat Host Dispatch
 
+## Status
+
+**Done** — Completed with design decision #21 (existential's heartbeat stays separate; seed builds its own host-neutral replacement).
+
+### Dependency updates
+- ~~Depends on EPIC-001~~ — satisfied (EPIC-001 completed session 10, PR #68)
+- ~~Depends on EPIC-002~~ — satisfied (EPIC-002 completed session 10, PR #73)
+- ~~Depends on EPIC-003~~ — satisfied (EPIC-003 completed earlier session)
+- ~~Depends on EPIC-005~~ — satisfied (shipped with 005 partial; soft dependency)
+- Blocks EPIC-008 — still active (EPIC-008 is Partial)
+- ~~Blocks EPIC-010~~ — partially satisfied (EPIC-010 is Mostly done)
+
 ## Goal
 
 Refactor heartbeat execution so it dispatches through the selected host adapter rather than directly invoking Claude CLI.

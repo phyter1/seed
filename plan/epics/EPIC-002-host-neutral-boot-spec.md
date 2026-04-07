@@ -1,5 +1,15 @@
 # EPIC-002: Host-Neutral Boot Spec
 
+## Status
+
+**Done** — Completed in session 10 (PR #73, rendered BOOT.md into CLAUDE.md).
+
+### Dependency updates
+- ~~Depends on EPIC-001~~ — satisfied (EPIC-001 completed session 10, PR #68)
+- ~~Blocks EPIC-003~~ — satisfied (EPIC-003 completed earlier session; shipped while 002 was still partial — soft dependency)
+- ~~Blocks EPIC-006~~ — satisfied (EPIC-006 completed with decision #21)
+- Blocks EPIC-009 — partially satisfied (EPIC-009 is Mostly done)
+
 ## Goal
 
 Replace `CLAUDE.md` as the source of truth with a host-neutral boot specification that can be rendered into host-specific entrypoints.
