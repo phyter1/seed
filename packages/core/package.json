@@ -1,0 +1,12 @@
+{
+  "name": "@seed/core",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

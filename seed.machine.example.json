@@ -1,0 +1,52 @@
+{
+  "machine": {
+    "hostname": "my-machine",
+    "os": "Darwin",
+    "arch": "arm64",
+    "cores": 8,
+    "ram_gb": 16,
+    "chip": "Apple M1 Pro",
+    "gpu": "Metal/MLX",
+    "can_mlx": true
+  },
+  "tools": {
+    "git": true,
+    "node": true,
+    "bun": true,
+    "python3": true,
+    "ollama": true,
+    "mlx_lm": true
+  },
+  "hosts": {
+    "default": "claude",
+    "heartbeat": "claude",
+    "installed": {
+      "claude": true,
+      "codex": true,
+      "gemini": false
+    },
+    "status": {
+      "claude": "ready",
+      "codex": "ready",
+      "gemini": "missing"
+    },
+    "versions": {
+      "claude": "Claude Code v1.0.0",
+      "codex": "Codex CLI v0.1.0",
+      "gemini": ""
+    },
+    "reasons": {
+      "claude": "",
+      "codex": "",
+      "gemini": "command not found"
+    }
+  },
+  "inference": {
+    "ollama_running": false,
+    "ollama_models": 0
+  },
+  "fleet": {
+    "machines": [],
+    "role": "standalone"
+  }
+}

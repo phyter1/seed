@@ -8,7 +8,7 @@ echo "  🌱 Seed — Hardware Detection"
 echo ""
 
 SEED_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-CONFIG="$SEED_DIR/seed.config.json"
+CONFIG="$SEED_DIR/seed.machine.json"
 
 # --- Detect platform ---
 OS=$(uname -s)
@@ -248,7 +248,7 @@ print(json.dumps(config, indent=2))
 " > "$CONFIG"
 
 echo ""
-echo "Detection complete. Config saved to seed.config.json"
+echo "Detection complete. Machine detection saved to seed.machine.json"
 echo ""
 
 # --- Report what needs to be installed ---

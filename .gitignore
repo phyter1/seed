@@ -35,6 +35,7 @@ notes/archive/*.md
 # Generated
 CLAUDE.md.generated
 seed.config.json
+seed.machine.json
 
 # OS
 .DS_Store

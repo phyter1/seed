@@ -39,7 +39,7 @@ bash setup/detect.sh
 claude
 ```
 
-`detect.sh` probes your hardware (CPU, RAM, GPU), checks for installed tools and host runtimes (Claude, Codex, Gemini), scans for model runtimes (MLX, Ollama), discovers other Seed machines on your network, and writes a `seed.config.json`.
+`detect.sh` probes your hardware (CPU, RAM, GPU), checks for installed tools and host runtimes (Claude, Codex, Gemini), scans for model runtimes (MLX, Ollama), discovers other Seed machines on your network, and writes a `seed.machine.json`.
 
 To add a machine to an existing fleet, `setup/install.sh` is a turnkey installer — it downloads the `seed-agent` binary, registers with a control plane, and starts it as a user-scoped service (launchd on macOS, systemd on Linux). No source checkout needed on the target machine.
 

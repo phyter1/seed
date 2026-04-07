@@ -5,6 +5,13 @@
     "": {
       "name": "seed",
     },
+    "packages/core": {
+      "name": "@seed/core",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@types/bun": "latest",
+      },
+    },
     "packages/fleet/control": {
       "name": "@seed/fleet-control",
       "version": "0.6.0",
@@ -24,6 +31,9 @@
       "version": "0.1.0",
       "dependencies": {
         "typescript": "^5.7.0",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
       },
     },
     "packages/inference/jury": {
@@ -99,6 +109,8 @@
   },
   "packages": {
     "@leichtgewicht/ip-codec": ["@leichtgewicht/ip-codec@2.0.5", "", {}, "sha512-Vo+PSpZG2/fmgmiNzYK9qWRh8h/CHrwD0mo1h1DzL4yzHNSfWYujGTYsWGreD000gcgmZ7K4Ys6Tx9TxtsKdDw=="],
+
+    "@seed/core": ["@seed/core@workspace:packages/core"],
 
     "@seed/fleet-control": ["@seed/fleet-control@workspace:packages/fleet/control"],
 
