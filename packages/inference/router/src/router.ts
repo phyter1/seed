@@ -13,8 +13,24 @@
 
 import { spawnSync, spawn } from "node:child_process";
 import net from "node:net";
-import { loadRouterConfig, type LoadedRouterConfig } from "./config";
 import { MlxSupervisor } from "./mlx-supervisor";
+import {
+  initState,
+  reloadConfig as reloadFleetConfig,
+  getFleet,
+  getJuryModels,
+  getAllMachineNames,
+  getOllamaMachines,
+  getConfigSource,
+  getRouterPort,
+  getMlxHost,
+  getMlxPythonPath,
+  getMlxStarterPath,
+  getMlxModel,
+  ensureQueue,
+  type MachineQueue,
+  type ReloadSummary,
+} from "./state";
 import type { ModelEntry, ChatMessage, ChatResponse, RoutingResult, JurorResult, JuryResult } from "./types";
 import {
   createTelemetryEmitter,
@@ -36,19 +52,30 @@ import {
 
 // ── Load Config ────────────────────────────────────────────────────────────
 
-const CONFIG: LoadedRouterConfig = loadRouterConfig();
+initState();
 
-const {
-  routerPort: ROUTER_PORT,
-  fleet: FLEET,
-  mlxHost: MLX_HOST,
-  mlxPythonPath: MLX_PYTHON_PATH,
-  mlxStarterPath: MLX_STARTER,
-  mlxModel: MLX_MODEL,
-  ollamaMachines: OLLAMA_MACHINES,
-  allMachineNames: ALL_MACHINE_NAMES,
-  source: CONFIG_SOURCE,
-} = CONFIG;
+// Immutable at runtime — these don't change on reload
+const ROUTER_PORT = getRouterPort();
+const MLX_HOST = getMlxHost();
+const MLX_PYTHON_PATH = getMlxPythonPath();
+const MLX_STARTER = getMlxStarterPath();
+const MLX_MODEL = getMlxModel();
+
+// Mutable state — synced from state module, updated on reload
+let FLEET = getFleet();
+let JURY_MODELS = getJuryModels();
+let OLLAMA_MACHINES = getOllamaMachines();
+let ALL_MACHINE_NAMES = getAllMachineNames();
+let CONFIG_SOURCE = getConfigSource();
+
+/** Sync local mutable bindings from the state module after a reload. */
+function syncFromState(): void {
+  FLEET = getFleet();
+  JURY_MODELS = getJuryModels();
+  OLLAMA_MACHINES = getOllamaMachines();
+  ALL_MACHINE_NAMES = getAllMachineNames();
+  CONFIG_SOURCE = getConfigSource();
+}
 
 // ── Telemetry ──────────────────────────────────────────────────────────────
 
@@ -458,25 +485,8 @@ async function streamOllama(
 }
 
 // ── Machine Queues (one inference at a time per machine) ────────────────────
-
-interface MachineQueue {
-  promise: Promise<void>;
-  depth: number;
-}
-
-const machineQueues: Record<string, MachineQueue> = {};
-
-// Initialize queues for all known machines
-for (const name of ALL_MACHINE_NAMES) {
-  machineQueues[name] = { promise: Promise.resolve(), depth: 0 };
-}
-
-function ensureQueue(machine: string): MachineQueue {
-  if (!machineQueues[machine]) {
-    machineQueues[machine] = { promise: Promise.resolve(), depth: 0 };
-  }
-  return machineQueues[machine];
-}
+// Queue storage and ensureQueue are imported from ./state.
+// Routing helpers remain here since they're tightly coupled to dispatch logic.
 
 function withMachineQueue<T>(machine: string, fn: () => Promise<T>): Promise<T> {
   const q = ensureQueue(machine);
@@ -518,7 +528,7 @@ function withPrePickedQueue<T>(machine: string, fn: () => Promise<T>): Promise<T
 // primitive. The aggregator prompt is kept byte-identical to the prior
 // inline version so production synthesis behaviour does not drift.
 
-const JURY_MODELS = FLEET.filter(m => m.provider === "ollama");
+// JURY_MODELS is a mutable let binding synced from state on reload (see syncFromState).
 const JURY_TEMPERATURES = [0.3, 0.5, 0.7, 0.9];
 
 interface JuryTask {
@@ -950,6 +960,36 @@ const server = Bun.serve({
           supervisor: mlxSupervisor.getState(),
         },
         config_source: CONFIG_SOURCE,
+      });
+    }
+
+    // Config reload — hot-swap fleet topology without restarting the router
+    if (url.pathname === "/v1/config/reload" && req.method === "POST") {
+      try {
+        const summary = reloadFleetConfig();
+        syncFromState();
+        console.log(`[config-reload] fleet reloaded: ${summary.fleet_size} models, ${summary.changes.added_models.length} added, ${summary.changes.removed_models.length} removed`);
+        return Response.json(summary);
+      } catch (err) {
+        console.error(`[config-reload] failed: ${err}`);
+        return Response.json({ reloaded: false, error: String(err) }, { status: 500 });
+      }
+    }
+
+    // Current config — read-only view of the fleet topology
+    if (url.pathname === "/v1/config" && req.method === "GET") {
+      return Response.json({
+        source: CONFIG_SOURCE,
+        fleet_size: FLEET.length,
+        fleet: FLEET.map(m => ({
+          machine: m.machine,
+          model: m.model,
+          provider: m.provider,
+          locality: m.locality ?? "local",
+          tags: m.tags,
+        })),
+        jury_models: JURY_MODELS.length,
+        machines: ALL_MACHINE_NAMES,
       });
     }
 
