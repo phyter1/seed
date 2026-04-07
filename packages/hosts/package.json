@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "test": "bun test",
     "discover": "bun run src/discover.ts",
     "run-headless": "bun run src/run-headless.ts"
   },
