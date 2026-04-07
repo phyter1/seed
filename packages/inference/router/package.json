@@ -1,6 +1,7 @@
 {
   "name": "@seed/router",
   "version": "1.3.0",
+  "private": true,
   "description": "Rule-based fleet router backed by mlx-vlm, with deterministic keyword routing and jury mode",
   "type": "module",
   "scripts": {
@@ -13,10 +14,10 @@
     "@seed/core": "workspace:*",
     "@seed/inference-utils": "workspace:*",
     "@seed/jury": "workspace:*",
-    "@seed/sensitivity": "workspace:*",
-    "typescript": "^5.7.0"
+    "@seed/sensitivity": "workspace:*"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
   }
 }
