@@ -23,13 +23,19 @@ Both can be true in one session; most sessions are fleet-code work.
 packages/
 ├── fleet/
 │   ├── control/       ← Control plane + per-machine agent (same binary family)
+│   ├── topology/      ← Static fleet topology config (seed.config.json deployment)
 │   ├── ssh/           ← Helpers for direct SSH access to fleet machines
 │   └── sync/          ← Cross-machine git sync utilities
 ├── memory/            ← Memory service (workload: installed on ren1)
 ├── heartbeat/         ← Identity heartbeat loop (for Ren)
 ├── core/              ← Shared boot contract (BOOT.md lives here)
-├── hosts/             ← Host adapters (claude, codex, gemini CLIs) — WIP
-├── inference/         ← Inference queue + workers — WIP
+├── hosts/             ← Host adapters (claude, codex, gemini CLIs)
+├── inference/
+│   ├── router/        ← Fleet router (workload: installed on ren3)
+│   ├── jury/          ← Ensemble consensus (multi-model fan-out + aggregation)
+│   ├── queue/         ← Inference queue — WIP
+│   ├── sensitivity/   ← Sensitivity classification for routing
+│   └── utils/         ← Shared inference utilities
 ├── providers/         ← Model provider adapters
 └── skills/            ← Shared skills
 ```
@@ -187,7 +193,7 @@ curl -X POST http://ren2.local:4310/v1/fleet/ren1/command \
 ```
 
 Allowed actions are in `ACTION_WHITELIST` in `packages/fleet/control/src/types.ts`. Today:
-`service.start/stop/restart/status`, `model.load/unload/swap/list`, `config.apply/report`, `health.report`, `repo.pull`, `agent.update/restart`, `workload.install/reload/remove/status/reconcile`.
+`service.start/stop/restart/status`, `model.load/unload/swap/list`, `config.apply/report`, `health.report`, `repo.pull`, `agent.update/restart`, `cli.update`, `control-plane.update`, `process.kill-by-port`, `workload.install/reload/remove/status/reconcile/gc`.
 
 ### Debugging
 
@@ -355,14 +361,13 @@ git merge my-feature --no-ff -m "merge: <summary>"
 
 ---
 
-## Current state (as of 2026-04-04)
+## Current state (as of 2026-04-07)
 
-**Fleet:** ren1 (Intel 32GB) · ren2 (Intel 32GB, control plane host) · ren3 (Apple Silicon 16GB) — all on seed v0.4.2.
+**Fleet:** ren1 (Intel 32GB) · ren2 (Intel 32GB, control plane host) · ren3 (Apple Silicon 16GB) — all on seed v0.6.0.
 
 **Deployed workloads:**
-- `memory@0.2.0` on ren1 (port 19888, 1722 memories, 1024-dim qwen3 embeddings)
-- `fleet-router@0.3.0` on ren3 (port 3000, manages MLX Qwen3.5-9B lifecycle)
+- `memory@0.4.10` on ren1 (port 19888, vector memory service)
+- `fleet-router@1.3.0` on ren3 (port 3000, rule-based model router)
+- `fleet-topology@0.1.0` on ren3 (static config, seed.config.json deployment)
 
-**External services observed:** `ollama` on ren1, ren2, ren3.
-
-**What's next:** Phase 2 of workloads (HTTPS artifact fetching from GitHub Releases), drift-healing reconcile tick, `seed workload` CLI commands. See `docs/workloads-design.md` for phases 2–6.
+**External services observed:** `ollama` on ren1, ren2.
