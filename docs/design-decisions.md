@@ -198,6 +198,14 @@ Identity and memory state lives at the repo root (`self.md`, `journal/`, `notes/
 
 **Rationale:** One authoritative layout. Host adapters, boot contract, and documentation all reference the same paths. Templates are the source of structure; root files are the source of identity. `detect.sh` calls `scaffold.sh` at the end of a successful run, so the Quick Start entry point sets up both config and identity structure. Running `scaffold.sh` multiple times is safe — it never overwrites existing files.
 
+### 21. Heartbeat systems stay separate — existential is reference, seed is future
+
+The existential repo's heartbeat (`heartbeat.sh`, `pulse.sh`, running on ren1) remains the operational heartbeat system. Seed's `packages/heartbeat/` package is a design-phase placeholder and does not replace or wrap the existential heartbeat. The two systems are independent.
+
+**Rationale:** Existential's heartbeat has been running for weeks with proven two-tier cadence (quick/Haiku every 10 min + deep/Opus every ~hour). Seed's heartbeat package has no deployable code. Forcing convergence would risk a working system for theoretical consistency. When seed's heartbeat package reaches feature parity, it can migrate the existential patterns. Until then, they coexist.
+
+**Relationship to EPIC-006:** EPIC-006 (Heartbeat Host Dispatch) is about making seed's *future* heartbeat host-neutral — dispatching through host adapters instead of hard-coding Claude CLI. That work proceeds independently and does not affect the existential heartbeat. When EPIC-006 completes, the resulting host-neutral heartbeat becomes a candidate to eventually replace the existential implementation.
+
 ---
 
 ## Open — Needs More Design
