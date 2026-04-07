@@ -12,45 +12,8 @@
 import { existsSync, readFileSync } from "fs";
 import { resolve } from "path";
 import type { ModelEntry, ProviderKind } from "./types";
-
-// ── Config File Shapes ─────────────────────────────────────────────────────
-
-interface SeedProviderConfig {
-  type: string;
-  base_url?: string;
-  locality?: "local" | "cloud";
-}
-
-interface SeedModelConfig {
-  id: string;
-  provider: string;
-  tags?: string[];
-  capabilities?: {
-    tools?: boolean;
-    structured_output?: boolean;
-    vision?: boolean;
-    reasoning?: boolean;
-  };
-}
-
-interface SeedMachineConfig {
-  hostname: string;
-  arch?: string;
-  runtime?: string;
-  roles?: string[];
-}
-
-interface SeedConfigFile {
-  routing?: {
-    strategy?: string;
-    router_model?: string;
-    router_port?: number;
-    prefer_local?: boolean;
-  };
-  providers?: Record<string, SeedProviderConfig>;
-  models?: SeedModelConfig[];
-  machines?: SeedMachineConfig[];
-}
+import type { SeedConfig } from "@seed/core/config";
+import { findConfigPath } from "@seed/core/config";
 
 interface LegacyFleetConfigFile {
   router: {
@@ -116,7 +79,7 @@ function machineNameFromHostname(hostname: string): string {
 
 function loadFromSeedConfig(configPath: string): LoadedRouterConfig {
   const raw = readFileSync(configPath, "utf-8");
-  const config = JSON.parse(raw) as SeedConfigFile;
+  const config = JSON.parse(raw) as SeedConfig;
 
   const providers = config.providers ?? {};
   const models = config.models ?? [];
@@ -293,7 +256,10 @@ function loadFromEnvOnly(): LoadedRouterConfig {
 // ── Public API ─────────────────────────────────────────────────────────────
 
 export function loadRouterConfig(): LoadedRouterConfig {
-  const seedConfigPath = process.env.SEED_CONFIG ?? resolve(import.meta.dir, "..", "..", "..", "..", "seed.config.json");
+  // Primary: shared loader checks SEED_CONFIG env var, then walks up from cwd
+  const seedConfigPath = findConfigPath();
+
+  // Router-specific fallbacks (not in the shared loader)
   // Set by the router workload manifest to the in-install-dir copy
   // that ships with the router tarball. Used when SEED_CONFIG points
   // at the fleet-topology-current symlink but fleet-topology has not
@@ -301,13 +267,13 @@ export function loadRouterConfig(): LoadedRouterConfig {
   const fallbackConfigPath = process.env.SEED_CONFIG_FALLBACK;
   const legacyConfigPath = process.env.FLEET_CONFIG ?? resolve(import.meta.dir, "..", "fleet.config.json");
 
-  if (existsSync(seedConfigPath)) {
+  if (seedConfigPath) {
     return loadFromSeedConfig(seedConfigPath);
   }
 
   if (fallbackConfigPath && existsSync(fallbackConfigPath)) {
     console.warn(
-      `[router] SEED_CONFIG ${seedConfigPath} not found; falling back to ${fallbackConfigPath}`
+      `[router] seed.config.json not found via shared loader; falling back to ${fallbackConfigPath}`
     );
     return loadFromSeedConfig(fallbackConfigPath);
   }

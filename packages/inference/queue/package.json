@@ -9,6 +9,7 @@
     "dev": "bun --watch run src/main.ts"
   },
   "dependencies": {
+    "@seed/core": "workspace:*",
     "bonjour-service": "^1.3.0",
     "hono": "^4.7.0"
   },

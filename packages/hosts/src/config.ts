@@ -1,17 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { HostId } from "./types";
-
-interface SeedConfig {
-  host?: {
-    default?: HostId;
-    heartbeat?: HostId;
-  };
-  heartbeat?: {
-    host?: HostId;
-    model?: string;
-  };
-}
+import type { SeedConfig } from "@seed/core/config";
 
 export interface ResolvedHeartbeatConfig {
   host: HostId;
@@ -31,11 +21,11 @@ export function resolveHeartbeatConfig(seedDir: string, overrides?: { host?: str
     }
   }
 
-  const host = (overrides?.host as HostId | undefined)
+  const host = ((overrides?.host
     ?? fileConfig.heartbeat?.host
     ?? fileConfig.host?.heartbeat
     ?? fileConfig.host?.default
-    ?? "claude";
+    ?? "claude") as HostId);
 
   const model = overrides?.model ?? fileConfig.heartbeat?.model;
 
