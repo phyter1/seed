@@ -24,6 +24,11 @@ Seed changes that. It provides:
 - Not a wrapper around an API
 - Not prescriptive about what kind of AI you build — the identity emerges from your relationship
 
+## Key concepts
+
+- **Host runtime** — The CLI tool you open a conversation in: Claude Code, Codex CLI, or Gemini CLI. The host reads the boot contract, presents the AI, and manages the conversation. You start with one command: `claude`, `codex`, or `gemini`.
+- **Provider** — The inference endpoint where the model actually runs: Anthropic API, OpenAI API, Ollama, MLX, etc. Providers are independent of hosts — you can use Claude Code (host) with models running on Ollama (provider), or any other combination.
+
 ## Quick Start
 
 ```bash
@@ -85,11 +90,13 @@ seed/
 │   │   ├── ssh/                 # Cross-machine SSH helpers
 │   │   └── sync/                # Git-based identity sync
 │   ├── hosts/                   # Host runtime adapters (Claude, Codex, Gemini)
+│   │                            # Boot file rendering implemented for CLAUDE.md only.
+│   │                            # Codex and Gemini adapters exist but CODEX.md/GEMINI.md renderers are not yet built.
 │   ├── inference/
 │   │   ├── router/              # Rule-based model router (@seed/router)
 │   │   ├── jury/                # Multi-model consensus (@seed/jury)
-│   │   ├── queue/               # Priority task queue (planned)
-│   │   ├── sensitivity/         # Content sensitivity classifier (planned)
+│   │   ├── queue/               # Priority task queue (WIP)
+│   │   ├── sensitivity/         # Content sensitivity classifier (functional)
 │   │   └── utils/               # Shared inference utilities
 │   ├── memory/                  # Vector memory service (Hono + bun:sqlite + sqlite-vec)
 │   ├── providers/               # Provider adapters (Anthropic, OpenAI, Gemini, Ollama, MLX, etc.)

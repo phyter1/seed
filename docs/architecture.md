@@ -60,7 +60,11 @@ packages/
 │
 ├── heartbeat/                   Autonomous pulse daemon (bash + launchd) [production]
 │
-└── skills/                      (does not exist — skills live in .claude/skills/)
+└── skills/                      Host-neutral skill definitions + render pipeline  [production]
+    ├── */skill.md               Canonical skill content (9 skills)
+    ├── */claude.json             Claude-specific adapter metadata
+    ├── render.ts                 Renders skill.md → .claude/skills/ adapters
+    └── render.test.ts            23 tests
 ```
 
 ## Layers
@@ -96,7 +100,7 @@ Deployed as a workload on ren1. Drop-in replacement for the original Python `rus
 
 Operational capabilities available in every conversation. **35 skills** in `.claude/skills/` — markdown-based definitions consumed by Claude Code. Categories: fleet ops, publishing, social, research, SDLC pipeline, domain work.
 
-There is no `packages/skills/` — skills are host-specific (Claude Code markdown format), not a shared TypeScript package.
+`packages/skills/` contains host-neutral skill definitions (9 skills as `skill.md` files) and a render pipeline (`render.ts`) that generates host-specific adapters. Currently renders to `.claude/skills/` for Claude Code. The canonical content lives in `packages/skills/`; `.claude/skills/` is a generated output.
 
 ### Layer 3: Host Adapters
 
