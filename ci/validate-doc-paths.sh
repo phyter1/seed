@@ -17,6 +17,7 @@ ALLOWLIST=(
   "projects.md"
   "objectives.md"
   "seed.config.json"
+  "seed.machine.json"
 )
 
 is_allowlisted() {

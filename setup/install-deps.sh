@@ -4,7 +4,7 @@
 set -e
 
 SEED_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-CONFIG="$SEED_DIR/seed.config.json"
+CONFIG="$SEED_DIR/seed.machine.json"
 
 if [ ! -f "$CONFIG" ]; then
   echo "Run detect.sh first: bash setup/detect.sh"
