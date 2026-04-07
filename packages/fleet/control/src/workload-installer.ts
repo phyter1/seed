@@ -43,6 +43,10 @@ export interface InstallerOptions {
    *  successful install, for rollback headroom. Defaults to 1.
    *  Use 0 for aggressive GC, -1 to disable pruning entirely. */
   keepPrior?: number;
+  /** Root directory where pre-staged artifact tarballs live. Defaults
+   *  to `~/.local/share/seed/workload-artifacts`. Used for automatic
+   *  tarball cleanup after a successful install. */
+  artifactRoot?: string;
 }
 
 export interface InstallResult {
@@ -779,6 +783,39 @@ export async function installWorkload(
   if (pruned.length > 0) {
     console.log(
       `[installer] pruned ${pruned.length} prior install dir(s): ${pruned.join(", ")}`
+    );
+  }
+
+  // 11. Prune stale artifact tarballs. Build the retained versions set
+  //     from install dirs still on disk (current + whatever keepPrior
+  //     preserved above). Wrapped in try/catch — tarball cleanup is
+  //     best-effort; a failure here must never fail the install itself.
+  try {
+    const artifactRoot = opts.artifactRoot ?? defaultArtifactRoot();
+    const retainedVersions = new Set<string>();
+    retainedVersions.add(manifest.version);
+    if (existsSync(installRoot)) {
+      const prefix = `${manifest.id}-`;
+      for (const entry of readdirSync(installRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        if (!entry.name.startsWith(prefix)) continue;
+        retainedVersions.add(entry.name.slice(prefix.length));
+      }
+    }
+    const tarballResult = pruneArtifactTarballs(
+      artifactRoot,
+      manifest.id,
+      retainedVersions,
+      false
+    );
+    if (tarballResult.removed.length > 0) {
+      console.log(
+        `[installer] pruned ${tarballResult.removed.length} stale artifact tarball(s): ${tarballResult.removed.join(", ")}`
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[installer] artifact tarball cleanup failed (non-fatal): ${err instanceof Error ? err.message : err}`
     );
   }
 
