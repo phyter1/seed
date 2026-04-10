@@ -198,6 +198,19 @@ describe("initPartner", () => {
     expect(result.createdPaths).toHaveLength(0);
   });
 
+  test("gitignoreUpdated is false when .gitignore already has marker", async () => {
+    const alreadyPatched = "node_modules/\n# Seed partner — identity files (local only)\nself.md\n";
+    await writeFile(join(tempDir, ".gitignore"), alreadyPatched);
+    const result = await initPartner({
+      projectPath: tempDir,
+      partnerName: "Aria",
+      projectName: "Matrix",
+      force: false,
+      dryRun: false,
+    });
+    expect(result.gitignoreUpdated).toBe(false);
+  });
+
   test("does not overwrite existing journal .gitkeep files", async () => {
     // Run twice — second run should not error on existing .gitkeep files
     await initPartner({

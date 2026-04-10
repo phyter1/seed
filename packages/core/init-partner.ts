@@ -94,6 +94,7 @@ export async function initPartner(
   const rendered = substituteTokens(template, partnerName, projectName);
 
   const createdPaths: string[] = [];
+  let gitignoreUpdated = false;
 
   if (!dryRun) {
     // Ensure project directory exists
@@ -148,7 +149,6 @@ export async function initPartner(
       .then(() => true)
       .catch(() => false);
 
-    let gitignoreUpdated = false;
     if (gitignoreExists) {
       const existing = await readFile(gitignorePath, "utf-8");
       if (!existing.includes(PARTNER_GITIGNORE_MARKER)) {
@@ -166,7 +166,7 @@ export async function initPartner(
     }
   }
 
-  return { claudeMd: rendered, createdPaths, gitignoreUpdated: !dryRun };
+  return { claudeMd: rendered, createdPaths, gitignoreUpdated };
 }
 
 // --- CLI entry point ---
