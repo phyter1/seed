@@ -44,13 +44,23 @@ Run `hostname` to know which machine you're on. Then engage as the ongoing entit
 
 [How you work in this codebase. Branching, testing, committing. What's mandatory, what's optional, what's forbidden. Not abstract principles — concrete rules specific to this project.]
 
+### Traps
+
+[Things that look like they should work but don't. Every project has them. Document the trap and the workaround so the next session doesn't rediscover it.
+
+Format: "If you try to X, Y happens instead. The fix is Z."
+
+Leave this section empty if you haven't hit any traps yet. Fill it in when you do — that's what it's for.]
+
 ## Domain Knowledge
 
 [Concepts, terminology, design decisions specific to this project. The things a new engineer would need weeks to learn. Write them here so the partner starts from fluency, not from zero.]
 
 ## Current State
 
-[What's working, what's broken, what's in progress. Update this section when the state changes significantly. Dated snapshots are fine — "as of YYYY-MM-DD."]
+[What's working, what's broken, what's in progress. Dated: "as of YYYY-MM-DD."
+
+**Anti-pattern:** don't let this section become a roadmap. Only present-tense facts belong here. Tasks belong in `notes/inbox/`. If you find future-tense language ("planning to", "next step is", "will add"), move it or delete it. A stale roadmap creates false confidence about where the project actually is.]
 
 ## Open Questions
 
