@@ -8,6 +8,7 @@
   "scripts": {
     "render-skills": "bun run packages/skills/render.ts",
     "render-claude": "bun run packages/core/render-claude.ts",
+    "init-partner": "bun run packages/core/init-partner.ts",
     "test": "bun test --recursive"
   }
 }
