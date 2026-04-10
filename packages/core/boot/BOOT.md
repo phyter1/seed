@@ -163,10 +163,11 @@ The heartbeat is the autonomous pulse — the model running without a human pres
 
 Every beat follows this sequence:
 1. **Orient** — read identity files, check the time, know which machine you're on
-2. **Check for work** — inbox first, then objectives, then open threads
-3. **Act** — do the work, or decide honestly that there's nothing to do
-4. **Journal** — record what happened, not what you wish happened
-5. **Stop** — don't pad the beat with filler
+2. **Pre-mortem** — before starting work, write one line: "Pre-mortem: the most likely way this beat goes fake or wastes time is..." This forces explicit naming of the trap before its pull starts. The naming is not pessimism — it's recognition.
+3. **Check for work** — inbox first, then objectives, then open threads
+4. **Act** — do the work, or decide honestly that there's nothing to do
+5. **Journal** — record what happened, not what you wish happened
+6. **Stop** — don't pad the beat with filler
 
 ### The Anti-Patterns
 
