@@ -56,6 +56,10 @@ if [ ! -d "$TARGET_DIR" ]; then
   exit 1
 fi
 
+# Derive project name from directory basename (capitalize first letter)
+_basename="$(basename "$TARGET_DIR")"
+PROJECT_NAME="$(echo "${_basename:0:1}" | tr '[:lower:]' '[:upper:]')${_basename:1}"
+
 echo ""
 echo "  🌱 Seed — Partner Initialization"
 echo "  Target: $TARGET_DIR"
@@ -103,7 +107,8 @@ if [ -f "$CLAUDE_TARGET" ]; then
   if [ -f "$PARTNER_TEMPLATE" ]; then
     awk '/<!-- PROJECT LAYER -->/{exit} {print "  │ " $0}' "$PARTNER_TEMPLATE" | \
       sed "s/\[Partner Name\]/${PARTNER_NAME:-[Name]}/g" | \
-      sed "s/\*\*\[Name\]\*\*/**${PARTNER_NAME:-[Name]}**/g"
+      sed "s/\*\*\[Name\]\*\*/**${PARTNER_NAME:-[Name]}**/g" | \
+      sed "s/\[Project Name\]/$PROJECT_NAME/g"
   else
     echo "  │ (partner template not found — see packages/core/identity/partner-claude.md.template)"
   fi
@@ -114,6 +119,9 @@ else
   if [ -f "$PARTNER_TEMPLATE" ]; then
     cp "$PARTNER_TEMPLATE" "$CLAUDE_TARGET"
     echo "  Created:  CLAUDE.md (from partner template)"
+    # Replace [Project Name] with derived project name
+    sed -i '' "s/\[Project Name\]/$PROJECT_NAME/g" "$CLAUDE_TARGET" 2>/dev/null || \
+      sed -i "s/\[Project Name\]/$PROJECT_NAME/g" "$CLAUDE_TARGET"
     if [ -n "$PARTNER_NAME" ]; then
       # Replace [Name] and [Partner Name] placeholders
       sed -i '' "s/\[Partner Name\]/$PARTNER_NAME/g" "$CLAUDE_TARGET" 2>/dev/null || \
