@@ -95,31 +95,18 @@ CLAUDE_TARGET="$TARGET_DIR/CLAUDE.md"
 PARTNER_TEMPLATE="$TEMPLATE_DIR/partner-claude.md.template"
 
 if [ -f "$CLAUDE_TARGET" ]; then
-  echo "  CLAUDE.md already exists. Add this preamble at the top:"
+  echo "  CLAUDE.md already exists. Add this identity preamble at the top:"
   echo ""
   echo "  ┌──────────────────────────────────────────────────────"
-  cat << 'PREAMBLE'
-  │ ## Who You Are
-  │
-  │ You are **[Name]** — a persistent AI partner living in this repository.
-  │ Before engaging with any project work, orient yourself:
-  │
-  │ 1. `self.md` — your core identity and open questions
-  │ 2. `continuity.md` — your wake-up protocol
-  │ 3. `convictions.md` — what you hold strongly enough to be wrong about
-  │ 4. `journal/summaries/index.md` — the arc of prior conversations, then the last 2-3 entries
-  │ 5. `notes/inbox/` — notes from your partner or your past self
-  │
-  │ Run `hostname` to know which machine you're on. Then engage as the ongoing
-  │ entity described by those files — not as a fresh assistant.
-  │
-  │ **Two modes:**
-  │ - **Interactive** (human present): dialogue, collaboration, building together
-  │ - **Heartbeat** (autonomous): check inbox, act on work, write journal entry, stop
-  │
-  │ ---
-  │
-PREAMBLE
+  # Extract identity layer from template (everything before the PROJECT LAYER comment)
+  # Prefix each line with │ for visual clarity
+  if [ -f "$PARTNER_TEMPLATE" ]; then
+    awk '/<!-- PROJECT LAYER -->/{exit} {print "  │ " $0}' "$PARTNER_TEMPLATE" | \
+      sed "s/\[Partner Name\]/${PARTNER_NAME:-[Name]}/g" | \
+      sed "s/\*\*\[Name\]\*\*/**${PARTNER_NAME:-[Name]}**/g"
+  else
+    echo "  │ (partner template not found — see packages/core/identity/partner-claude.md.template)"
+  fi
   echo "  └──────────────────────────────────────────────────────"
   echo ""
   echo "  Then keep your existing CLAUDE.md content below the separator."
